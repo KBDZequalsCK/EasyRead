@@ -2,6 +2,10 @@
 
 A minimal native reading app for Intel-based Macs. EasyRead is an independent AppKit reimplementation of a local reading workflow; it does not copy code or assets from the original app.
 
+## Repository
+
+The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.com/KBDZequalsCK/EasyRead) as a public repository.
+
 ## Features
 
 - Import and manage local TXT, EPUB, and PDF books
@@ -60,6 +64,8 @@ On first launch, EasyRead checks both paths. You can also choose a location from
 # 简阅 Intel 版
 
 一个面向 Intel 芯片 Mac 的本地极简阅读器原型。它不是对原 App 的代码或素材复制，而是用原生 AppKit 重实现类似的本地阅读体验。
+
+GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 
 ## 当前功能
 

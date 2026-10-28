@@ -5,6 +5,9 @@
 项目目录：
 `/Users/kbdz/Documents/EasyRead`
 
+GitHub 公开仓库：
+`https://github.com/KBDZequalsCK/EasyRead`
+
 请先阅读：
 
 - `README.md`
