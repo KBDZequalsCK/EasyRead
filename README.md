@@ -26,6 +26,8 @@ The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.co
 - `Sources/IntelReader/main.swift`: application source
 - `Info.plist`: app metadata and document type declarations
 - `build.sh`: build script for the Intel `x86_64` app
+- `package-dmg.sh`: creates a distributable Intel DMG with an installation guide
+- `DMG_README.txt`: bilingual guide included in the DMG
 - `outputs/简阅.app`: latest built app bundle
 - `NEXT_CHAT_PROMPT.md`: context for continuing development in a new conversation
 - `work/`: optional debugging and acceptance artifacts; not required at runtime
@@ -36,10 +38,19 @@ Requires macOS 12 or later and Swift 5.8 or later. Calibre is also required for 
 
 ```sh
 ./build.sh
-open "build/简阅.app"
+open "outputs/简阅.app"
 ```
 
 The build script produces an unsigned Intel `x86_64` executable. On first launch, use Finder's Open command if macOS blocks the unsigned app.
+
+To create the distributable DMG (after building the app):
+
+```sh
+./package-dmg.sh
+open "outputs/简阅-Intel.dmg"
+```
+
+The DMG contains the app, an Applications shortcut, and a bilingual installation guide. Ordinary users should download the DMG from the repository's **Releases** page instead of downloading the source ZIP.
 
 When opening MOBI/AZW files, EasyRead calls Calibre's `ebook-convert` in the background and stores the converted EPUB only in a temporary directory. DRM-protected books generally cannot be converted.
 
@@ -90,6 +101,8 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 - `Sources/IntelReader/main.swift`：主程序源码
 - `Info.plist`：App 元数据与文档类型声明
 - `build.sh`：构建 Intel `x86_64` 版 App 的脚本
+- `package-dmg.sh`：生成带安装说明的 Intel DMG
+- `DMG_README.txt`：会放入 DMG 的中英双语安装说明
 - `outputs/简阅.app`：当前最新构建产物
 - `NEXT_CHAT_PROMPT.md`：给新对话继续协作用的开场提示
 - `work/`：调试和验收过程中留下的截图、过程记录等临时材料，不参与 App 运行，可按需清理
@@ -100,10 +113,19 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 
 ```sh
 ./build.sh
-open "build/简阅.app"
+open "outputs/简阅.app"
 ```
 
 当前构建脚本会生成 Intel `x86_64` 可执行文件。未提供开发者签名，首次打开时可以在 Finder 中右键选择“打开”。
+
+生成可直接分发的 DMG：
+
+```sh
+./package-dmg.sh
+open "outputs/简阅-Intel.dmg"
+```
+
+DMG 内含 App、“应用程序”文件夹快捷方式和中英双语安装说明。普通用户应从仓库的 **Releases** 页面下载 DMG，不必下载源码 ZIP。
 
 MOBI/AZW 文件打开时，App 会在后台调用 Calibre 的 `ebook-convert`，转换结果只保存在临时目录。带 DRM 的电子书通常无法转换，需要先使用无 DRM 文件或先转换成 EPUB。
 
