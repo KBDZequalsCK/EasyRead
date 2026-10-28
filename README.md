@@ -1,3 +1,62 @@
+# EasyRead for Intel Mac
+
+A minimal native reading app for Intel-based Macs. EasyRead is an independent AppKit reimplementation of a local reading workflow; it does not copy code or assets from the original app.
+
+## Features
+
+- Import and manage local TXT, EPUB, and PDF books
+- Store the bookshelf at `~/Library/Application Support/IntelReader/library.json`
+- Automatically discover and sync the `极简阅读` folder in iCloud Drive, with manual and scheduled sync support
+- Choose the actual iCloud folder from the sidebar when the default path is unavailable
+- Copy books imported from Finder into the active iCloud library before opening them
+- TXT reading with font-size controls, dark mode, and long-text scrolling
+- Continuous PDF reading with automatic zoom
+- EPUB rendering through WebKit after merging the spine chapters
+- MOBI, AZW, and AZW3 support through a local Calibre conversion to a temporary EPUB
+- Immersive reading mode with a bookshelf visibility toggle and the `⌘⇧S` shortcut
+- Open books by dragging them onto the app icon or choosing EasyRead from Finder's Open With menu
+- Remove stale iCloud bookshelf records without deleting local-file records when iCloud is temporarily unavailable
+
+## Project Layout
+
+- `Sources/IntelReader/main.swift`: application source
+- `Info.plist`: app metadata and document type declarations
+- `build.sh`: build script for the Intel `x86_64` app
+- `outputs/简阅.app`: latest built app bundle
+- `NEXT_CHAT_PROMPT.md`: context for continuing development in a new conversation
+- `work/`: optional debugging and acceptance artifacts; not required at runtime
+
+## Build
+
+Requires macOS 12 or later and Swift 5.8 or later. Calibre is also required for MOBI/AZW reading.
+
+```sh
+./build.sh
+open "build/简阅.app"
+```
+
+The build script produces an unsigned Intel `x86_64` executable. On first launch, use Finder's Open command if macOS blocks the unsigned app.
+
+When opening MOBI/AZW files, EasyRead calls Calibre's `ebook-convert` in the background and stores the converted EPUB only in a temporary directory. DRM-protected books generally cannot be converted.
+
+## iCloud
+
+This version uses the iCloud directories already mounted by macOS and does not use a third-party server. The default path for the iPhone app's library is:
+
+```text
+~/Library/Mobile Documents/iCloud~com~photon~reader/Documents
+```
+
+The standard iCloud Drive folder is also supported:
+
+```text
+~/Library/Mobile Documents/com~apple~CloudDocs/极简阅读
+```
+
+On first launch, EasyRead checks both paths. You can also choose a location from the sidebar. Book metadata edits only affect the Mac bookshelf; removing a book from the bookshelf does not delete the iCloud original unless the explicit iCloud deletion action is chosen.
+
+---
+
 # 简阅 Intel 版
 
 一个面向 Intel 芯片 Mac 的本地极简阅读器原型。它不是对原 App 的代码或素材复制，而是用原生 AppKit 重实现类似的本地阅读体验。
