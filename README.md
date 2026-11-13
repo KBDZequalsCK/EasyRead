@@ -29,7 +29,7 @@ The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.co
 - `build.sh`: build script for the Intel `x86_64` app
 - `package-dmg.sh`: creates a distributable Intel DMG with an installation guide
 - `DMG_README.txt`: bilingual guide included in the DMG
-- `outputs/简阅.app`: latest built app bundle
+- `outputs/EasyRead.app`: latest built app bundle
 - `NEXT_CHAT_PROMPT.md`: context for continuing development in a new conversation
 - `work/`: optional debugging and acceptance artifacts; not required at runtime
 
@@ -39,7 +39,7 @@ Requires macOS 12 or later and Swift 5.8 or later. Calibre is also required for 
 
 ```sh
 ./build.sh
-open "outputs/简阅.app"
+open "outputs/EasyRead.app"
 ```
 
 The build script produces an unsigned Intel `x86_64` executable. On first launch, use Finder's Open command if macOS blocks the unsigned app.
@@ -48,7 +48,7 @@ To create the distributable DMG (after building the app):
 
 ```sh
 ./package-dmg.sh
-open "outputs/简阅-Intel.dmg"
+open "outputs/EasyRead-Intel.dmg"
 ```
 
 The DMG contains the app, an Applications shortcut, and a bilingual installation guide. Ordinary users should download the DMG from the repository's **Releases** page instead of downloading the source ZIP.
@@ -73,7 +73,7 @@ On first launch, EasyRead checks both paths. You can also choose a location from
 
 ---
 
-# 简阅 Intel 版
+# EasyRead Intel 版
 
 一个面向 Intel 芯片 Mac 的本地极简阅读器原型。它不是对原 App 的代码或素材复制，而是用原生 AppKit 重实现类似的本地阅读体验。
 
@@ -95,7 +95,7 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 - 支持快捷键 `⌘⇧S` 切换左侧书架显示状态，并记住上次选择
 - 自动记住窗口大小与位置（包括强制退出后的布局），下次启动时恢复
 - 支持把文件直接拖入 App 图标打开
-- 支持在访达中对书籍文件使用“打开方式 → 简阅”，会自动复制到当前 iCloud 书库并打开
+- 支持在访达中对书籍文件使用“打开方式 → EasyRead”，会自动复制到当前 iCloud 书库并打开
 - 界面支持中文 / English 切换，可在应用菜单或侧栏底部切换，并会记住选择
 - 同步时会清理已经从 iCloud 文件夹删除的书架记录；本地文件记录不会因 iCloud 暂时不可用而被误删
 
@@ -106,7 +106,7 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 - `build.sh`：构建 Intel `x86_64` 版 App 的脚本
 - `package-dmg.sh`：生成带安装说明的 Intel DMG
 - `DMG_README.txt`：会放入 DMG 的中英双语安装说明
-- `outputs/简阅.app`：当前最新构建产物
+- `outputs/EasyRead.app`：当前最新构建产物
 - `NEXT_CHAT_PROMPT.md`：给新对话继续协作用的开场提示
 - `work/`：调试和验收过程中留下的截图、过程记录等临时材料，不参与 App 运行，可按需清理
 
@@ -116,7 +116,7 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 
 ```sh
 ./build.sh
-open "outputs/简阅.app"
+open "outputs/EasyRead.app"
 ```
 
 当前构建脚本会生成 Intel `x86_64` 可执行文件。未提供开发者签名，首次打开时可以在 Finder 中右键选择“打开”。
@@ -125,7 +125,7 @@ open "outputs/简阅.app"
 
 ```sh
 ./package-dmg.sh
-open "outputs/简阅-Intel.dmg"
+open "outputs/EasyRead-Intel.dmg"
 ```
 
 DMG 内含 App、“应用程序”文件夹快捷方式和中英双语安装说明。普通用户应从仓库的 **Releases** 页面下载 DMG，不必下载源码 ZIP。

@@ -3,9 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
-STAGE_APP_DIR="$BUILD_DIR/简阅.app"
+STAGE_APP_DIR="$BUILD_DIR/EasyRead.app"
 OUTPUT_DIR="$ROOT_DIR/outputs"
-APP_DIR="$OUTPUT_DIR/简阅.app"
+APP_DIR="$OUTPUT_DIR/EasyRead.app"
 CONTENTS_DIR="$STAGE_APP_DIR/Contents"
 ICON_SOURCE="$ROOT_DIR/Resources/AppIcon.png"
 ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"

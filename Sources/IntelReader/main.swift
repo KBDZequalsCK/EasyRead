@@ -959,7 +959,7 @@ final class SidebarViewController: NSViewController {
 
     private let scrollView = NSScrollView()
     private let listContainer = NSView()
-    private let titleLabel = NSTextField(labelWithString: L("简阅", "EasyRead"))
+    private let titleLabel = NSTextField(labelWithString: "EasyRead")
     private let subtitleLabel = NSTextField(labelWithString: L("你的本地阅读空间", "Your local reading space"))
     private let hideSidebarButton = NSButton()
     private let importButton = NSButton()
@@ -1248,7 +1248,7 @@ final class SidebarViewController: NSViewController {
     }
 
     func applyLanguage() {
-        titleLabel.stringValue = L("简阅", "EasyRead")
+        titleLabel.stringValue = "EasyRead"
         subtitleLabel.stringValue = L("你的本地阅读空间", "Your local reading space")
         hideSidebarButton.image = NSImage(
             systemSymbolName: "sidebar.left",
@@ -1990,7 +1990,7 @@ final class MainViewController: NSViewController {
     }
 
     private func applyLanguage() {
-        view.window?.title = L("简阅", "EasyRead")
+        view.window?.title = "EasyRead"
         sidebar.applyLanguage()
         reader.applyLanguage()
     }
@@ -2365,7 +2365,7 @@ final class MainViewController: NSViewController {
         panel.allowedContentTypes = ["txt", "epub", "pdf", "mobi", "azw", "azw3"].compactMap {
             UTType(filenameExtension: $0)
         }
-        panel.message = L("选择要加入简阅书架的文件", "Choose files to add to your EasyRead library")
+        panel.message = L("选择要加入 EasyRead 书架的文件", "Choose files to add to your EasyRead library")
         panel.begin { [weak self] response in
             guard response == .OK else { return }
             self?.importURLs(panel.urls)
@@ -2391,7 +2391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = L("简阅", "EasyRead")
+        window.title = "EasyRead"
         window.titleVisibility = .hidden
         window.appearance = NSAppearance(named: initialDark ? .darkAqua : .aqua)
         window.isReleasedWhenClosed = false
@@ -2516,12 +2516,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func buildMainMenu() {
         let mainMenu = NSMenu()
-        let appName = L("简阅", "EasyRead")
+        let appName = "EasyRead"
 
         let appMenuItem = NSMenuItem(title: appName, action: nil, keyEquivalent: "")
         let appMenu = NSMenu(title: appName)
         let aboutItem = NSMenuItem(
-            title: L("关于简阅", "About EasyRead"),
+            title: L("关于 EasyRead", "About EasyRead"),
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
@@ -2546,7 +2546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(languageMenuItem)
         appMenu.addItem(.separator())
 
-        let hideItem = NSMenuItem(title: L("隐藏简阅", "Hide EasyRead"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideItem = NSMenuItem(title: L("隐藏 EasyRead", "Hide EasyRead"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         hideItem.target = NSApp
         appMenu.addItem(hideItem)
 
@@ -2568,7 +2568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(showAllItem)
         appMenu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: L("退出简阅", "Quit EasyRead"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: L("退出 EasyRead", "Quit EasyRead"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApp
         appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu

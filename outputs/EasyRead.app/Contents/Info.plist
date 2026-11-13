@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>简阅</string>
+    <string>EasyRead</string>
     <key>CFBundleExecutable</key>
     <string>IntelReader</string>
     <key>CFBundleIconFile</key>
@@ -11,13 +11,13 @@
     <key>CFBundleIdentifier</key>
     <string>local.codex.intelreader</string>
     <key>CFBundleName</key>
-    <string>简阅</string>
+    <string>EasyRead</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.0</string>
+    <string>0.3.1</string>
     <key>CFBundleVersion</key>
-    <string>6</string>
+    <string>7</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>CFBundleDocumentTypes</key>

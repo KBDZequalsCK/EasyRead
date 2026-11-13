@@ -17,7 +17,7 @@ GitHub 公开仓库：
 - `build.sh`
 
 当前最新 App：
-`/Users/kbdz/Documents/EasyRead/outputs/简阅.app`
+`/Users/kbdz/Documents/EasyRead/outputs/EasyRead.app`
 
 请先检查现有功能和代码，再根据我后续提出的问题修改源码、重新构建 Intel `x86_64` 版本，并验证 App 可以启动。不要删除或覆盖我的 iCloud 原书文件。
 
@@ -27,7 +27,7 @@ GitHub 公开仓库：
 - iCloud 主要使用的路径是：`~/Library/Mobile Documents/iCloud~com~photon~reader/Documents`
 - 书架数据保存在：`~/Library/Application Support/IntelReader/library.json`
 - 当前 App 已支持：TXT、PDF、EPUB、MOBI、AZW、AZW3
-- 访达“打开方式 → 简阅”已支持自动导入并打开
+- 访达“打开方式 → EasyRead”已支持自动导入并打开
 - 同步会清理已经从 iCloud 文件夹删除的书架记录
 - 输出目录里应只保留一个 `.app`，不需要 ZIP
 
