@@ -5,6 +5,48 @@ import PDFKit
 import UniformTypeIdentifiers
 import WebKit
 
+enum AppLanguage: String {
+    case chinese = "zh"
+    case english = "en"
+
+    var displayName: String {
+        switch self {
+        case .chinese:
+            return "中文"
+        case .english:
+            return "English"
+        }
+    }
+}
+
+enum AppLocalization {
+    private static let languageKey = "AppLanguage"
+
+    static var language: AppLanguage {
+        guard let raw = UserDefaults.standard.string(forKey: languageKey),
+              let language = AppLanguage(rawValue: raw) else {
+            return .chinese
+        }
+        return language
+    }
+
+    static func setLanguage(_ language: AppLanguage) {
+        guard language != self.language else { return }
+        UserDefaults.standard.set(language.rawValue, forKey: languageKey)
+        // Let AppKit-provided labels (open panels, standard dialogs) follow the choice too.
+        UserDefaults.standard.set([language.rawValue], forKey: "AppleLanguages")
+        NotificationCenter.default.post(name: .appLanguageDidChange, object: nil)
+    }
+}
+
+extension Notification.Name {
+    static let appLanguageDidChange = Notification.Name("AppLanguageDidChange")
+}
+
+func L(_ chinese: String, _ english: String) -> String {
+    AppLocalization.language == .english ? english : chinese
+}
+
 struct LibraryBook: Codable, Equatable {
     let id: UUID
     let path: String
@@ -166,18 +208,21 @@ enum ReaderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unsupportedFormat:
-            return "这个文件格式暂时只能加入书架，尚未提供本地解码器。"
+            return L("这个文件格式暂时只能加入书架，尚未提供本地解码器。",
+                     "This format can be added to the library, but no local decoder is available yet.")
         case .invalidEPUB:
-            return "EPUB 文件结构无法识别。"
+            return L("EPUB 文件结构无法识别。", "The EPUB file structure could not be recognized.")
         case .extractionFailed:
-            return "无法解压这个 EPUB 文件。"
+            return L("无法解压这个 EPUB 文件。", "This EPUB file could not be extracted.")
         case .converterUnavailable:
-            return "未找到 Calibre 的 MOBI/AZW 解码器。\n请安装 Calibre 后重新打开这本书。"
+            return L("未找到 Calibre 的 MOBI/AZW 解码器。\n请安装 Calibre 后重新打开这本书。",
+                     "Calibre's MOBI/AZW converter was not found.\nInstall Calibre and reopen this book.")
         case .conversionFailed(let detail):
             if detail.isEmpty {
-                return "MOBI/AZW 文件无法转换。\n如果文件带有 DRM，请先解除 DRM 或转换为 EPUB。"
+                return L("MOBI/AZW 文件无法转换。\n如果文件带有 DRM，请先解除 DRM 或转换为 EPUB。",
+                         "The MOBI/AZW file could not be converted.\nIf it uses DRM, remove the DRM or convert it to EPUB first.")
             }
-            return "MOBI/AZW 文件无法转换：\n\(detail)"
+            return L("MOBI/AZW 文件无法转换：\n\(detail)", "The MOBI/AZW file could not be converted:\n\(detail)")
         }
     }
 }
@@ -773,10 +818,10 @@ final class BookRowButton: NSButton {
 
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu()
-        menu.addItem(withTitle: "编辑书名和作者", action: #selector(editMetadataRequested), keyEquivalent: "")
+        menu.addItem(withTitle: L("编辑书名和作者", "Edit Title & Author"), action: #selector(editMetadataRequested), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "从书架移除", action: #selector(removeRequested), keyEquivalent: "")
-        menu.addItem(withTitle: "从 iCloud 删除并移出书架", action: #selector(removeFromCloudRequested), keyEquivalent: "")
+        menu.addItem(withTitle: L("从书架移除", "Remove from Library"), action: #selector(removeRequested), keyEquivalent: "")
+        menu.addItem(withTitle: L("从 iCloud 删除并移出书架", "Delete from iCloud & Remove"), action: #selector(removeFromCloudRequested), keyEquivalent: "")
         menu.items.forEach { $0.target = self }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
@@ -843,12 +888,61 @@ final class BookRowButton: NSButton {
     }
 
     private static func detailText(for book: LibraryBook) -> String {
-        let author = book.author.isEmpty ? "作者未设置" : "作者：\(book.author)"
+        let author = book.author.isEmpty
+            ? L("作者未设置", "Author not set")
+            : L("作者：\(book.author)", "By \(book.author)")
         return "\(author)\n\(book.format)  ·  \(progressText(book.progress))"
     }
 
     private static func progressText(_ progress: Double) -> String {
-        progress <= 0 ? "未开始" : "\(Int(progress * 100))%"
+        progress <= 0 ? L("未开始", "Not started") : "\(Int(progress * 100))%"
+    }
+}
+
+enum CloudSyncStatus {
+    case checking
+    case ready
+    case syncing
+    case synced(bookCount: Int)
+    case syncCompleted(added: Int, removed: Int)
+    case folderMissing
+    case folderChosen(path: String)
+    case booksAdded(count: Int)
+    case bookDeleted
+
+    var text: String {
+        switch self {
+        case .checking:
+            return L("正在检查 iCloud…", "Checking iCloud…")
+        case .ready:
+            return L("iCloud：准备同步", "iCloud: Ready to sync")
+        case .syncing:
+            return L("iCloud：正在同步…", "iCloud: Syncing…")
+        case .synced(let count):
+            return count == 1
+                ? L("iCloud：已同步 · 1 本", "iCloud: Synced · 1 book")
+                : L("iCloud：已同步 · \(count) 本", "iCloud: Synced · \(count) books")
+        case .syncCompleted(let added, let removed):
+            var parts: [String] = []
+            if added > 0 {
+                parts.append(added == 1 ? L("新增 1 本", "1 added") : L("新增 \(added) 本", "\(added) added"))
+            }
+            if removed > 0 {
+                parts.append(removed == 1 ? L("移除 1 本", "1 removed") : L("移除 \(removed) 本", "\(removed) removed"))
+            }
+            return L("iCloud：同步完成，\(parts.joined(separator: "，"))",
+                     "iCloud: Sync complete, \(parts.joined(separator: ", "))")
+        case .folderMissing:
+            return L("iCloud：未找到文件夹，请点击“位置”选择", "iCloud: Folder not found. Click “Location” to choose one.")
+        case .folderChosen(let path):
+            return L("iCloud：已选择 \(path)", "iCloud: Selected \(path)")
+        case .booksAdded(let count):
+            return count == 1
+                ? L("iCloud：已加入 1 本书", "iCloud: Added 1 book")
+                : L("iCloud：已加入 \(count) 本书", "iCloud: Added \(count) books")
+        case .bookDeleted:
+            return L("iCloud：已删除 1 本书", "iCloud: Deleted 1 book")
+        }
     }
 }
 
@@ -865,15 +959,16 @@ final class SidebarViewController: NSViewController {
 
     private let scrollView = NSScrollView()
     private let listContainer = NSView()
-    private let titleLabel = NSTextField(labelWithString: "简阅")
-    private let subtitleLabel = NSTextField(labelWithString: "你的本地阅读空间")
+    private let titleLabel = NSTextField(labelWithString: L("简阅", "EasyRead"))
+    private let subtitleLabel = NSTextField(labelWithString: L("你的本地阅读空间", "Your local reading space"))
     private let hideSidebarButton = NSButton()
     private let importButton = NSButton()
     private let syncButton = NSButton()
     private let chooseFolderButton = NSButton()
-    private let emptyLabel = NSTextField(labelWithString: "书架还是空的\n把你的第一本书放进来吧")
-    private let cloudStatusLabel = NSTextField(labelWithString: "正在检查 iCloud…")
-    private let footerLabel = NSTextField(labelWithString: "支持 TXT · EPUB · PDF\nIntel 原生运行")
+    private let emptyLabel = NSTextField(labelWithString: L("书架还是空的\n把你的第一本书放进来吧", "Your library is empty\nAdd your first book to get started"))
+    private let cloudStatusLabel = NSTextField(labelWithString: CloudSyncStatus.checking.text)
+    private let footerLabel = NSTextField(labelWithString: L("支持 TXT · EPUB · PDF\nIntel 原生运行", "TXT · EPUB · PDF\nNative on Intel"))
+    private let languageButton = NSButton()
     private var rowsByBookID: [UUID: BookRowButton] = [:]
     private var hoveredRow: BookRowButton?
     private var scrollObserver: NSObjectProtocol?
@@ -881,6 +976,7 @@ final class SidebarViewController: NSViewController {
     private var becomeKeyObserver: NSObjectProtocol?
     private var isDark = false
     private var hasAppliedTheme = false
+    private var cloudStatus: CloudSyncStatus = .checking
     private var cloudStatusColor: NSColor?
 
     deinit {
@@ -906,38 +1002,44 @@ final class SidebarViewController: NSViewController {
         subtitleLabel.font = NSFont.systemFont(ofSize: 12)
         subtitleLabel.textColor = NSColor(calibratedWhite: 0.36, alpha: 1)
 
-        hideSidebarButton.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "隐藏书架")
+        hideSidebarButton.image = NSImage(
+            systemSymbolName: "sidebar.left",
+            accessibilityDescription: L("隐藏书架", "Hide Library")
+        )
         hideSidebarButton.imagePosition = .imageOnly
         hideSidebarButton.isBordered = false
         hideSidebarButton.contentTintColor = NSColor(calibratedWhite: 0.42, alpha: 1)
         hideSidebarButton.target = self
         hideSidebarButton.action = #selector(hideSidebarClicked)
-        hideSidebarButton.toolTip = "隐藏左侧书架（⌘⇧S）"
+        hideSidebarButton.toolTip = L("隐藏左侧书架（⌘⇧S）", "Hide sidebar (⌘⇧S)")
 
-        importButton.title = "导入书籍"
+        importButton.title = L("导入书籍", "Import")
         importButton.target = self
         importButton.action = #selector(importClicked)
         importButton.bezelStyle = .rounded
         importButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         importButton.imagePosition = .imageLeading
+        importButton.toolTip = L("导入本地书籍", "Import local books")
 
-        syncButton.title = "同步"
+        syncButton.title = L("同步", "Sync")
         syncButton.target = self
         syncButton.action = #selector(syncClicked)
         syncButton.bezelStyle = .texturedRounded
         syncButton.image = NSImage(systemSymbolName: "icloud.and.arrow.down", accessibilityDescription: nil)
         syncButton.imagePosition = .imageLeading
+        syncButton.toolTip = L("从 iCloud 文件夹同步", "Sync from the iCloud folder")
 
-        chooseFolderButton.title = "位置"
+        chooseFolderButton.title = L("位置", "Folder")
         chooseFolderButton.target = self
         chooseFolderButton.action = #selector(chooseFolderClicked)
         chooseFolderButton.bezelStyle = .texturedRounded
         chooseFolderButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
         chooseFolderButton.imagePosition = .imageLeading
+        chooseFolderButton.toolTip = L("选择 iCloud 文件夹位置", "Choose the iCloud folder location")
 
         let actions = NSStackView(views: [syncButton, chooseFolderButton, importButton])
         actions.orientation = .horizontal
-        actions.spacing = 7
+        actions.spacing = 6
 
         let header = NSStackView(views: [titleLabel, subtitleLabel, actions])
         header.orientation = .vertical
@@ -966,18 +1068,27 @@ final class SidebarViewController: NSViewController {
         cloudStatusLabel.textColor = NSColor(calibratedWhite: 0.48, alpha: 1)
         cloudStatusLabel.lineBreakMode = .byTruncatingTail
 
+        languageButton.isBordered = false
+        languageButton.focusRingType = .none
+        languageButton.setButtonType(.momentaryChange)
+        languageButton.target = self
+        languageButton.action = #selector(toggleLanguage)
+        applyLanguageButtonStyle()
+
         root.addSubview(header)
         root.addSubview(hideSidebarButton)
         root.addSubview(scrollView)
         root.addSubview(emptyLabel)
         root.addSubview(cloudStatusLabel)
         root.addSubview(footerLabel)
+        root.addSubview(languageButton)
         header.translatesAutoresizingMaskIntoConstraints = false
         hideSidebarButton.translatesAutoresizingMaskIntoConstraints = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         cloudStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         footerLabel.translatesAutoresizingMaskIntoConstraints = false
+        languageButton.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 30),
@@ -999,7 +1110,10 @@ final class SidebarViewController: NSViewController {
             cloudStatusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -22),
             cloudStatusLabel.bottomAnchor.constraint(equalTo: footerLabel.topAnchor, constant: -7),
             footerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22),
-            footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20)
+            footerLabel.trailingAnchor.constraint(lessThanOrEqualTo: languageButton.leadingAnchor, constant: -8),
+            footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20),
+            languageButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            languageButton.bottomAnchor.constraint(equalTo: footerLabel.bottomAnchor)
         ])
 
         view = root
@@ -1107,6 +1221,7 @@ final class SidebarViewController: NSViewController {
             ? NSColor(calibratedWhite: 0.52, alpha: 1)
             : NSColor(calibratedWhite: 0.48, alpha: 1)
         cloudStatusLabel.textColor = cloudStatusColor ?? defaultCloudStatusColor
+        applyLanguageButtonStyle()
         listContainer.subviews
             .compactMap { $0 as? BookRowButton }
             .forEach { $0.applyTheme(isDark: isDark) }
@@ -1126,10 +1241,64 @@ final class SidebarViewController: NSViewController {
             : NSColor(calibratedWhite: 0.48, alpha: 1)
     }
 
-    func setCloudStatus(_ text: String, color: NSColor? = nil) {
-        cloudStatusLabel.stringValue = text
+    func setCloudStatus(_ status: CloudSyncStatus, color: NSColor? = nil) {
+        cloudStatus = status
         cloudStatusColor = color
-        cloudStatusLabel.textColor = color ?? defaultCloudStatusColor
+        renderCloudStatus()
+    }
+
+    func applyLanguage() {
+        titleLabel.stringValue = L("简阅", "EasyRead")
+        subtitleLabel.stringValue = L("你的本地阅读空间", "Your local reading space")
+        hideSidebarButton.image = NSImage(
+            systemSymbolName: "sidebar.left",
+            accessibilityDescription: L("隐藏书架", "Hide Library")
+        )
+        hideSidebarButton.toolTip = L("隐藏左侧书架（⌘⇧S）", "Hide sidebar (⌘⇧S)")
+        importButton.title = L("导入书籍", "Import")
+        syncButton.title = L("同步", "Sync")
+        chooseFolderButton.title = L("位置", "Folder")
+        importButton.toolTip = L("导入本地书籍", "Import local books")
+        syncButton.toolTip = L("从 iCloud 文件夹同步", "Sync from the iCloud folder")
+        chooseFolderButton.toolTip = L("选择 iCloud 文件夹位置", "Choose the iCloud folder location")
+        emptyLabel.stringValue = L(
+            "书架还是空的\n把你的第一本书放进来吧",
+            "Your library is empty\nAdd your first book to get started"
+        )
+        footerLabel.stringValue = L(
+            "支持 TXT · EPUB · PDF\nIntel 原生运行",
+            "TXT · EPUB · PDF\nNative on Intel"
+        )
+        applyLanguageButtonStyle()
+        renderCloudStatus()
+        reload(books: books)
+    }
+
+    private func renderCloudStatus() {
+        cloudStatusLabel.stringValue = cloudStatus.text
+        cloudStatusLabel.textColor = cloudStatusColor ?? defaultCloudStatusColor
+    }
+
+    private func applyLanguageButtonStyle() {
+        let color = isDark
+            ? NSColor(calibratedWhite: 0.62, alpha: 1)
+            : NSColor(calibratedWhite: 0.42, alpha: 1)
+        let title = AppLocalization.language == .chinese ? "English" : "中文"
+        languageButton.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: color,
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ]
+        )
+        languageButton.toolTip = AppLocalization.language == .chinese
+            ? "Switch to English"
+            : "切换到中文"
+    }
+
+    @objc private func toggleLanguage() {
+        AppLocalization.setLanguage(AppLocalization.language == .chinese ? .english : .chinese)
     }
 
     private func updateListFrame() {
@@ -1196,16 +1365,23 @@ final class SidebarViewController: NSViewController {
 }
 
 final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHandler {
-    private let titleLabel = NSTextField(labelWithString: "选择一本书开始阅读")
-    private let subtitleLabel = NSTextField(labelWithString: "支持拖入本地文件，内容保存在你的 Mac 上")
+    private enum PlaceholderState {
+        case empty
+        case book
+        case removed
+    }
+
+    private let titleLabel = NSTextField(labelWithString: L("选择一本书开始阅读", "Select a book to start reading"))
+    private let subtitleLabel = NSTextField(labelWithString: L("支持拖入本地文件，内容保存在你的 Mac 上", "Drag in local files; content stays on your Mac"))
     private let contentView = NSView()
     private let emptyState = NSView()
     private let fontSizeLabel = NSTextField(labelWithString: "")
     private let showSidebarButton = NSButton()
     private let themeButton = NSButton()
     private let emptyMark = NSTextField(labelWithString: "◌")
-    private let emptyTitleLabel = NSTextField(labelWithString: "安静地读一本书")
-    private let emptySubtitleLabel = NSTextField(labelWithString: "从左侧导入书籍，或直接把文件拖进窗口")
+    private let emptyTitleLabel = NSTextField(labelWithString: L("安静地读一本书", "Read in peace"))
+    private let emptySubtitleLabel = NSTextField(labelWithString: L("从左侧导入书籍，或直接把文件拖进窗口", "Import books from the sidebar, or drag files into the window"))
+    private var placeholderState: PlaceholderState = .empty
     private var currentBook: LibraryBook?
     private var textView: NSTextView?
     private var pdfView: PDFView?
@@ -1253,18 +1429,18 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         fontSizeLabel.stringValue = "\(Int(fontSize))"
         fontSizeLabel.widthAnchor.constraint(equalToConstant: 28).isActive = true
 
-        themeButton.title = "夜间"
+        themeButton.title = L("夜间", "Night")
         themeButton.bezelStyle = .texturedRounded
         themeButton.image = NSImage(systemSymbolName: "moon", accessibilityDescription: nil)
         themeButton.imagePosition = .imageLeading
         themeButton.target = self
         themeButton.action = #selector(toggleTheme)
 
-        showSidebarButton.title = "显示书架"
+        showSidebarButton.title = L("显示书架", "Show Library")
         showSidebarButton.bezelStyle = .texturedRounded
         showSidebarButton.image = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: nil)
         showSidebarButton.imagePosition = .imageLeading
-        showSidebarButton.toolTip = "显示左侧书架（⌘⇧S）"
+        showSidebarButton.toolTip = L("显示左侧书架（⌘⇧S）", "Show sidebar (⌘⇧S)")
         showSidebarButton.isHidden = true
         showSidebarButton.target = self
         showSidebarButton.action = #selector(toggleSidebarRequested)
@@ -1331,16 +1507,17 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         loadGeneration += 1
         let generation = loadGeneration
         currentBook = book
+        placeholderState = .book
         currentProgress = min(max(book.progress, 0), 0.999)
         titleLabel.stringValue = book.title
-        subtitleLabel.stringValue = "\(book.format) · 本地文件"
+        subtitleLabel.stringValue = L("\(book.format) · 本地文件", "\(book.format) · Local file")
         clearContent()
         emptyState.isHidden = true
         contentView.isHidden = false
 
         switch book.format {
         case "TXT":
-            showLoading(message: "正在打开 TXT…")
+            showLoading(message: L("正在打开 TXT…", "Opening TXT…"))
             let url = URL(fileURLWithPath: book.path)
             let fontSize = self.fontSize
             let isDark = self.isDark
@@ -1365,7 +1542,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
                 }
             }
         case "PDF":
-            showLoading(message: "正在打开 PDF…")
+            showLoading(message: L("正在打开 PDF…", "Opening PDF…"))
             let url = URL(fileURLWithPath: book.path)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let document = PDFDocument(url: url)
@@ -1379,7 +1556,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
                 }
             }
         case "EPUB":
-            showLoading(message: "正在解压 EPUB…")
+            showLoading(message: L("正在解压 EPUB…", "Extracting EPUB…"))
             let url = URL(fileURLWithPath: book.path)
             let fontSize = self.fontSize
             let isDark = self.isDark
@@ -1398,7 +1575,10 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
                 }
             }
         case "MOBI", "AZW", "AZW3":
-            showLoading(message: "正在解析 \(book.format)…\n首次打开可能需要一点时间")
+            showLoading(message: L(
+                "正在解析 \(book.format)…\n首次打开可能需要一点时间",
+                "Parsing \(book.format)…\nThe first open may take a moment"
+            ))
             let url = URL(fileURLWithPath: book.path)
             let fontSize = self.fontSize
             let isDark = self.isDark
@@ -1421,7 +1601,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
                 }
             }
         default:
-            showUnsupported(message: "暂不支持 \(book.format) 格式")
+            showUnsupported(message: L("暂不支持 \(book.format) 格式", "\(book.format) format is not supported yet"))
         }
     }
 
@@ -1541,8 +1721,9 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
     }
 
     private func showEmptyState() {
-        titleLabel.stringValue = "选择一本书开始阅读"
-        subtitleLabel.stringValue = "支持拖入本地文件，内容保存在你的 Mac 上"
+        placeholderState = .empty
+        titleLabel.stringValue = L("选择一本书开始阅读", "Select a book to start reading")
+        subtitleLabel.stringValue = L("支持拖入本地文件，内容保存在你的 Mac 上", "Drag in local files; content stays on your Mac")
         clearContent()
         contentView.isHidden = true
         emptyState.isHidden = false
@@ -1552,9 +1733,43 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         guard currentBook?.path == path else { return }
         currentBook = nil
         currentProgress = 0
-        titleLabel.stringValue = "这本书已从 iCloud 文件夹移除"
-        subtitleLabel.stringValue = "请重新导入文件，或从左侧选择其他书籍"
-        showMessage("当前书籍文件已不存在\n同步已将它从书架移除", color: secondaryTextColor)
+        placeholderState = .removed
+        titleLabel.stringValue = L("这本书已从 iCloud 文件夹移除", "This book was removed from the iCloud folder")
+        subtitleLabel.stringValue = L("请重新导入文件，或从左侧选择其他书籍", "Import it again or choose another book")
+        showMessage(
+            L("当前书籍文件已不存在\n同步已将它从书架移除", "The book file no longer exists\nSync removed it from the library"),
+            color: secondaryTextColor
+        )
+    }
+
+    func applyLanguage() {
+        showSidebarButton.title = L("显示书架", "Show Library")
+        showSidebarButton.toolTip = L("显示左侧书架（⌘⇧S）", "Show sidebar (⌘⇧S)")
+        themeButton.title = isDark ? L("日间", "Day") : L("夜间", "Night")
+        themeButton.toolTip = isDark
+            ? L("切换到浅色阅读", "Switch to light reading")
+            : L("切换到夜间阅读", "Switch to night reading")
+        emptyTitleLabel.stringValue = L("安静地读一本书", "Read in peace")
+        emptySubtitleLabel.stringValue = L(
+            "从左侧导入书籍，或直接把文件拖进窗口",
+            "Import books from the sidebar, or drag files into the window"
+        )
+
+        switch placeholderState {
+        case .book:
+            if let currentBook {
+                subtitleLabel.stringValue = L("\(currentBook.format) · 本地文件", "\(currentBook.format) · Local file")
+            }
+        case .removed:
+            titleLabel.stringValue = L("这本书已从 iCloud 文件夹移除", "This book was removed from the iCloud folder")
+            subtitleLabel.stringValue = L("请重新导入文件，或从左侧选择其他书籍", "Import it again or choose another book")
+            showMessage(
+                L("当前书籍文件已不存在\n同步已将它从书架移除", "The book file no longer exists\nSync removed it from the library"),
+                color: secondaryTextColor
+            )
+        case .empty:
+            showEmptyState()
+        }
     }
 
     @objc private func decreaseFont() {
@@ -1594,9 +1809,11 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         emptySubtitleLabel.textColor = isDark ? NSColor(calibratedWhite: 0.62, alpha: 1) : NSColor.secondaryLabelColor
         textView?.textColor = isDark ? NSColor(calibratedWhite: 0.88, alpha: 1) : NSColor(calibratedWhite: 0.22, alpha: 1)
         pdfView?.backgroundColor = isDark ? NSColor(calibratedWhite: 0.1, alpha: 1) : NSColor(calibratedWhite: 0.86, alpha: 1)
-        themeButton.title = isDark ? "日间" : "夜间"
+        themeButton.title = isDark ? L("日间", "Day") : L("夜间", "Night")
         themeButton.image = NSImage(systemSymbolName: isDark ? "sun.max" : "moon", accessibilityDescription: nil)
-        themeButton.toolTip = isDark ? "切换到浅色阅读" : "切换到夜间阅读"
+        themeButton.toolTip = isDark
+            ? L("切换到浅色阅读", "Switch to light reading")
+            : L("切换到夜间阅读", "Switch to night reading")
         applyWebViewReaderStyle()
     }
 
@@ -1676,11 +1893,15 @@ final class MainViewController: NSViewController {
     private var isSyncing = false
     private var lastSyncDate: Date?
     private var activationObserver: NSObjectProtocol?
+    private var languageObserver: NSObjectProtocol?
     private var isDark: Bool { reader.isDarkMode }
 
     deinit {
         if let activationObserver {
             NotificationCenter.default.removeObserver(activationObserver)
+        }
+        if let languageObserver {
+            NotificationCenter.default.removeObserver(languageObserver)
         }
     }
 
@@ -1743,7 +1964,7 @@ final class MainViewController: NSViewController {
             self?.removeBookFromCloud(book)
         }
         sidebar.reload(books: store.books, scrollToTop: true)
-        sidebar.setCloudStatus("iCloud：准备同步")
+        sidebar.setCloudStatus(.ready)
         sidebarVisible = !UserDefaults.standard.bool(forKey: "SidebarHidden")
         reader.setSidebarVisible(sidebarVisible)
         applySidebarVisibility(animated: false)
@@ -1759,6 +1980,19 @@ final class MainViewController: NSViewController {
         ) { [weak self] _ in
             self?.syncOnActivation()
         }
+        languageObserver = NotificationCenter.default.addObserver(
+            forName: .appLanguageDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyLanguage()
+        }
+    }
+
+    private func applyLanguage() {
+        view.window?.title = L("简阅", "EasyRead")
+        sidebar.applyLanguage()
+        reader.applyLanguage()
     }
 
     override func viewDidAppear() {
@@ -1840,10 +2074,13 @@ final class MainViewController: NSViewController {
 
     private func removeBook(_ book: LibraryBook) {
         let alert = NSAlert()
-        alert.messageText = "从书架移除这本书？"
-        alert.informativeText = "只会从这个 Mac 版的书架中移除，不会删除 iCloud 文件夹里的原书。"
-        alert.addButton(withTitle: "从书架移除")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L("从书架移除这本书？", "Remove this book from the library?")
+        alert.informativeText = L(
+            "只会从这个 Mac 版的书架中移除，不会删除 iCloud 文件夹里的原书。",
+            "This only removes the book from the library on this Mac. The original file in your iCloud folder will not be deleted."
+        )
+        alert.addButton(withTitle: L("从书架移除", "Remove"))
+        alert.addButton(withTitle: L("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         store.remove(book)
@@ -1852,26 +2089,29 @@ final class MainViewController: NSViewController {
 
     private func editBookMetadata(_ book: LibraryBook) {
         let alert = NSAlert()
-        alert.messageText = "编辑书名和作者"
-        alert.informativeText = "只修改书架显示信息，不修改 iCloud 原文件。"
+        alert.messageText = L("编辑书名和作者", "Edit Title & Author")
+        alert.informativeText = L(
+            "只修改书架显示信息，不修改 iCloud 原文件。",
+            "This only changes how the book appears in your library. The original iCloud file is untouched."
+        )
 
         let editorView = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 104))
-        let titleCaption = NSTextField(labelWithString: "书名")
+        let titleCaption = NSTextField(labelWithString: L("书名", "Title"))
         titleCaption.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         titleCaption.textColor = NSColor.secondaryLabelColor
         titleCaption.frame = NSRect(x: 0, y: 74, width: 360, height: 18)
 
         let titleField = NSTextField(string: book.title)
-        titleField.placeholderString = "书名"
+        titleField.placeholderString = L("书名", "Title")
         titleField.frame = NSRect(x: 0, y: 48, width: 360, height: 26)
 
-        let authorCaption = NSTextField(labelWithString: "作者")
+        let authorCaption = NSTextField(labelWithString: L("作者", "Author"))
         authorCaption.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         authorCaption.textColor = NSColor.secondaryLabelColor
         authorCaption.frame = NSRect(x: 0, y: 26, width: 360, height: 18)
 
         let authorField = NSTextField(string: book.author)
-        authorField.placeholderString = "作者（可留空）"
+        authorField.placeholderString = L("作者（可留空）", "Author (optional)")
         authorField.frame = NSRect(x: 0, y: 0, width: 360, height: 26)
 
         editorView.addSubview(titleCaption)
@@ -1879,8 +2119,8 @@ final class MainViewController: NSViewController {
         editorView.addSubview(authorCaption)
         editorView.addSubview(authorField)
         alert.accessoryView = editorView
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: L("保存", "Save"))
+        alert.addButton(withTitle: L("取消", "Cancel"))
         alert.window.initialFirstResponder = titleField
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -1907,10 +2147,10 @@ final class MainViewController: NSViewController {
         alert.informativeText = message
         let field = NSTextField(string: initialValue)
         field.frame = NSRect(x: 0, y: 0, width: 360, height: 26)
-        field.placeholderString = allowsEmpty ? "可留空" : "请输入名称"
+        field.placeholderString = allowsEmpty ? L("可留空", "Optional") : L("请输入名称", "Enter a name")
         alert.accessoryView = field
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: L("保存", "Save"))
+        alert.addButton(withTitle: L("取消", "Cancel"))
         alert.window.initialFirstResponder = field
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -1923,29 +2163,35 @@ final class MainViewController: NSViewController {
         let cloud = CloudFolderSync.shared
         guard cloud.contains(URL(fileURLWithPath: book.path)) else {
             let alert = NSAlert()
-            alert.messageText = "这本书不在当前 iCloud 文件夹中"
-            alert.informativeText = "它只能从 Mac 书架移除，无法通过此选项删除。"
-            alert.addButton(withTitle: "好")
+            alert.messageText = L("这本书不在当前 iCloud 文件夹中", "This book is not in the current iCloud folder")
+            alert.informativeText = L(
+                "它只能从 Mac 书架移除，无法通过此选项删除。",
+                "It can only be removed from the Mac library; this option cannot delete it."
+            )
+            alert.addButton(withTitle: L("好", "OK"))
             alert.runModal()
             return
         }
 
         let alert = NSAlert()
-        alert.messageText = "从 iCloud 删除这本书？"
-        alert.informativeText = "这会从“极简阅读”iCloud 文件夹中删除原文件，并可能同步删除 iPhone 上的对应文件。此操作无法通过本 App 撤销。"
+        alert.messageText = L("从 iCloud 删除这本书？", "Delete this book from iCloud?")
+        alert.informativeText = L(
+            "这会从“极简阅读”iCloud 文件夹中删除原文件，并可能同步删除 iPhone 上的对应文件。此操作无法通过本 App 撤销。",
+            "This deletes the original file from the “极简阅读” iCloud folder and may also delete the matching file on your iPhone. This cannot be undone from this app."
+        )
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "从 iCloud 删除")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: L("从 iCloud 删除", "Delete from iCloud"))
+        alert.addButton(withTitle: L("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         do {
             try FileManager.default.removeItem(atPath: book.path)
             store.remove(book)
             sidebar.reload(books: store.books, scrollToTop: true)
-            sidebar.setCloudStatus("iCloud：已删除 1 本书")
+            sidebar.setCloudStatus(.bookDeleted)
         } catch {
             let errorAlert = NSAlert(error: error)
-            errorAlert.messageText = "无法从 iCloud 删除这本书"
+            errorAlert.messageText = L("无法从 iCloud 删除这本书", "Could not delete this book from iCloud")
             errorAlert.runModal()
         }
     }
@@ -2003,7 +2249,7 @@ final class MainViewController: NSViewController {
                 if let first = importedBooks.first {
                     self.reader.show(book: first)
                 }
-                self.sidebar.setCloudStatus("iCloud：已加入 \(importedBooks.count) 本书")
+                self.sidebar.setCloudStatus(.booksAdded(count: importedBooks.count))
             }
         }
     }
@@ -2013,7 +2259,7 @@ final class MainViewController: NSViewController {
         isSyncing = true
         lastSyncDate = Date()
         if showStatus {
-            sidebar.setCloudStatus("iCloud：正在同步…")
+            sidebar.setCloudStatus(.syncing)
         }
 
         let existingPaths = Set(store.books.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
@@ -2086,18 +2332,11 @@ final class MainViewController: NSViewController {
                 self.sidebar.reload(books: self.store.books, scrollToTop: addedCount > 0)
 
                 if !syncAvailable {
-                    self.sidebar.setCloudStatus("iCloud：未找到文件夹，请点击“位置”选择", color: .systemOrange)
+                    self.sidebar.setCloudStatus(.folderMissing, color: .systemOrange)
                 } else if addedCount > 0 || !staleBooks.isEmpty {
-                    var changes: [String] = []
-                    if addedCount > 0 {
-                        changes.append("新增 \(addedCount) 本")
-                    }
-                    if !staleBooks.isEmpty {
-                        changes.append("移除 \(staleBooks.count) 本")
-                    }
-                    self.sidebar.setCloudStatus("iCloud：同步完成，\(changes.joined(separator: "，"))")
+                    self.sidebar.setCloudStatus(.syncCompleted(added: addedCount, removed: staleBooks.count))
                 } else {
-                    self.sidebar.setCloudStatus("iCloud：已同步 · \(urls.count) 本")
+                    self.sidebar.setCloudStatus(.synced(bookCount: urls.count))
                 }
                 self.isSyncing = false
             }
@@ -2109,12 +2348,12 @@ final class MainViewController: NSViewController {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "选择此文件夹"
-        panel.message = "请选择 iCloud Drive 中的“极简阅读”文件夹"
+        panel.prompt = L("选择此文件夹", "Choose")
+        panel.message = L("请选择 iCloud Drive 中的“极简阅读”文件夹", "Choose the “极简阅读” folder in iCloud Drive")
         panel.begin { [weak self] response in
             guard response == .OK, let folder = panel.url else { return }
             CloudFolderSync.shared.setFolder(folder)
-            self?.sidebar.setCloudStatus("iCloud：已选择 \(CloudFolderSync.shared.displayPath)")
+            self?.sidebar.setCloudStatus(.folderChosen(path: CloudFolderSync.shared.displayPath))
             self?.syncFromCloud(showStatus: true)
         }
     }
@@ -2126,7 +2365,7 @@ final class MainViewController: NSViewController {
         panel.allowedContentTypes = ["txt", "epub", "pdf", "mobi", "azw", "azw3"].compactMap {
             UTType(filenameExtension: $0)
         }
-        panel.message = "选择要加入简阅书架的文件"
+        panel.message = L("选择要加入简阅书架的文件", "Choose files to add to your EasyRead library")
         panel.begin { [weak self] response in
             guard response == .OK else { return }
             self?.importURLs(panel.urls)
@@ -2152,7 +2391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "简阅"
+        window.title = L("简阅", "EasyRead")
         window.titleVisibility = .hidden
         window.appearance = NSAppearance(named: initialDark ? .darkAqua : .aqua)
         window.isReleasedWhenClosed = false
@@ -2165,6 +2404,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ).size
         restoreWindowFrame()
         isWindowReady = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(languageDidChange),
+            name: .appLanguageDidChange,
+            object: nil
+        )
         buildMainMenu()
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
@@ -2271,11 +2516,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func buildMainMenu() {
         let mainMenu = NSMenu()
+        let appName = L("简阅", "EasyRead")
 
-        let appMenuItem = NSMenuItem(title: "简阅", action: nil, keyEquivalent: "")
-        let appMenu = NSMenu(title: "简阅")
+        let appMenuItem = NSMenuItem(title: appName, action: nil, keyEquivalent: "")
+        let appMenu = NSMenu(title: appName)
         let aboutItem = NSMenuItem(
-            title: "关于简阅",
+            title: L("关于简阅", "About EasyRead"),
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
@@ -2283,12 +2529,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(aboutItem)
         appMenu.addItem(.separator())
 
-        let hideItem = NSMenuItem(title: "隐藏简阅", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let languageMenuItem = NSMenuItem(title: L("语言 / Language", "Language / 语言"), action: nil, keyEquivalent: "")
+        let languageMenu = NSMenu(title: L("语言 / Language", "Language / 语言"))
+        for language in [AppLanguage.chinese, .english] {
+            let item = NSMenuItem(
+                title: language.displayName,
+                action: #selector(changeLanguage(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = language.rawValue
+            item.state = AppLocalization.language == language ? .on : .off
+            languageMenu.addItem(item)
+        }
+        languageMenuItem.submenu = languageMenu
+        appMenu.addItem(languageMenuItem)
+        appMenu.addItem(.separator())
+
+        let hideItem = NSMenuItem(title: L("隐藏简阅", "Hide EasyRead"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         hideItem.target = NSApp
         appMenu.addItem(hideItem)
 
         let hideOthersItem = NSMenuItem(
-            title: "隐藏其他",
+            title: L("隐藏其他", "Hide Others"),
             action: #selector(NSApplication.hideOtherApplications(_:)),
             keyEquivalent: "h"
         )
@@ -2297,7 +2560,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(hideOthersItem)
 
         let showAllItem = NSMenuItem(
-            title: "显示全部",
+            title: L("显示全部", "Show All"),
             action: #selector(NSApplication.unhideAllApplications(_:)),
             keyEquivalent: ""
         )
@@ -2305,16 +2568,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(showAllItem)
         appMenu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "退出简阅", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: L("退出简阅", "Quit EasyRead"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApp
         appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
-        let fileMenuItem = NSMenuItem(title: "文件", action: nil, keyEquivalent: "")
-        let fileMenu = NSMenu(title: "文件")
+        let fileMenuItem = NSMenuItem(title: L("文件", "File"), action: nil, keyEquivalent: "")
+        let fileMenu = NSMenu(title: L("文件", "File"))
         let importItem = NSMenuItem(
-            title: "导入书籍…",
+            title: L("导入书籍…", "Import Books…"),
             action: #selector(MainViewController.importBooksFromMenu),
             keyEquivalent: "o"
         )
@@ -2322,7 +2585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileMenu.addItem(importItem)
 
         let syncItem = NSMenuItem(
-            title: "同步 iCloud",
+            title: L("同步 iCloud", "Sync iCloud"),
             action: #selector(MainViewController.syncFromMenu),
             keyEquivalent: "r"
         )
@@ -2331,24 +2594,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
 
-        let editMenuItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
-        let editMenu = NSMenu(title: "编辑")
-        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
-        let redoItem = NSMenuItem(title: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        let editMenuItem = NSMenuItem(title: L("编辑", "Edit"), action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: L("编辑", "Edit"))
+        editMenu.addItem(withTitle: L("撤销", "Undo"), action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = NSMenuItem(title: L("重做", "Redo"), action: Selector(("redo:")), keyEquivalent: "z")
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(redoItem)
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "剪切", action: Selector(("cut:")), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "拷贝", action: Selector(("copy:")), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "粘贴", action: Selector(("paste:")), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "全选", action: Selector(("selectAll:")), keyEquivalent: "a")
+        editMenu.addItem(withTitle: L("剪切", "Cut"), action: Selector(("cut:")), keyEquivalent: "x")
+        editMenu.addItem(withTitle: L("拷贝", "Copy"), action: Selector(("copy:")), keyEquivalent: "c")
+        editMenu.addItem(withTitle: L("粘贴", "Paste"), action: Selector(("paste:")), keyEquivalent: "v")
+        editMenu.addItem(withTitle: L("全选", "Select All"), action: Selector(("selectAll:")), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
-        let viewMenuItem = NSMenuItem(title: "显示", action: nil, keyEquivalent: "")
-        let viewMenu = NSMenu(title: "显示")
+        let viewMenuItem = NSMenuItem(title: L("显示", "View"), action: nil, keyEquivalent: "")
+        let viewMenu = NSMenu(title: L("显示", "View"))
         let toggleSidebarItem = NSMenuItem(
-            title: "显示/隐藏书架",
+            title: L("显示/隐藏书架", "Show/Hide Library"),
             action: #selector(MainViewController.toggleSidebarFromMenu),
             keyEquivalent: "s"
         )
@@ -2359,6 +2622,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(viewMenuItem)
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func changeLanguage(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let language = AppLanguage(rawValue: raw),
+              language != AppLocalization.language else { return }
+        AppLocalization.setLanguage(language)
+    }
+
+    @objc private func languageDidChange() {
+        buildMainMenu()
     }
 
     private func enqueueOpenURLs(_ urls: [URL]) {

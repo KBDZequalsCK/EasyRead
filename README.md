@@ -19,6 +19,7 @@ The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.co
 - MOBI, AZW, and AZW3 support through a local Calibre conversion to a temporary EPUB
 - Immersive reading mode with a bookshelf visibility toggle and the `⌘⇧S` shortcut
 - Open books by dragging them onto the app icon or choosing EasyRead from Finder's Open With menu
+- Switch the interface between Chinese and English from the app menu or the sidebar footer; the choice is remembered
 - Remove stale iCloud bookshelf records without deleting local-file records when iCloud is temporarily unavailable
 
 ## Project Layout
@@ -95,6 +96,7 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 - 自动记住窗口大小与位置（包括强制退出后的布局），下次启动时恢复
 - 支持把文件直接拖入 App 图标打开
 - 支持在访达中对书籍文件使用“打开方式 → 简阅”，会自动复制到当前 iCloud 书库并打开
+- 界面支持中文 / English 切换，可在应用菜单或侧栏底部切换，并会记住选择
 - 同步时会清理已经从 iCloud 文件夹删除的书架记录；本地文件记录不会因 iCloud 暂时不可用而被误删
 
 ## 项目目录说明
