@@ -331,7 +331,7 @@ enum BookImporter {
             fileManager.fileExists(atPath: url.appendingPathComponent("META-INF/container.xml").path)
     }
 
-    static func epubHTML(from url: URL) throws -> (htmlURL: URL, accessRoot: URL) {
+    static func epubHTML(from url: URL, fontSize: CGFloat = 19, isDark: Bool = false) throws -> (htmlURL: URL, accessRoot: URL) {
         let fileManager = FileManager.default
         let workspace = fileManager.temporaryDirectory
             .appendingPathComponent("IntelReader-\(UUID().uuidString)", isDirectory: true)
@@ -392,6 +392,12 @@ enum BookImporter {
             return bodyContents(from: source)
         }.joined(separator: "\n<hr class=\"chapter-break\">\n")
 
+        let background = isDark ? "#1b1c1a" : "#f6f5f0"
+        let foreground = isDark ? "#e7e4dc" : "#2c302d"
+        let linkColor = isDark ? "#8db6a0" : "#3f7560"
+        let ruleColor = isDark ? "#3a3b36" : "#d9d8d0"
+        let scheme = isDark ? "dark" : "light"
+
         let html = """
         <!doctype html>
         <html>
@@ -399,20 +405,20 @@ enum BookImporter {
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <style>
-            :root { color-scheme: light; }
+            :root { color-scheme: \(scheme); }
             body {
               margin: 0 auto;
               max-width: 760px;
               padding: 60px 44px 120px;
-              color: #2c302d;
-              background: #f6f5f0;
+              color: \(foreground);
+              background: \(background);
               font-family: Georgia, "Times New Roman", serif;
-              font-size: 19px;
+              font-size: \(Int(fontSize))px;
               line-height: 1.82;
             }
             img { max-width: 100%; height: auto; }
-            a { color: #3f7560; }
-            .chapter-break { border: 0; border-top: 1px solid #d9d8d0; margin: 64px 0; }
+            a { color: \(linkColor); }
+            .chapter-break { border: 0; border-top: 1px solid \(ruleColor); margin: 64px 0; }
           </style>
         </head>
         <body>\(body)</body>
@@ -424,7 +430,7 @@ enum BookImporter {
         return (htmlURL, workspace)
     }
 
-    static func convertedEPUBHTML(from url: URL) throws -> (htmlURL: URL, accessRoot: URL) {
+    static func convertedEPUBHTML(from url: URL, fontSize: CGFloat, isDark: Bool) throws -> (htmlURL: URL, accessRoot: URL) {
         let workspace = FileManager.default.temporaryDirectory
             .appendingPathComponent("IntelReader-Converted-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
@@ -461,7 +467,7 @@ enum BookImporter {
         }
 
         do {
-            let result = try epubHTML(from: convertedURL)
+            let result = try epubHTML(from: convertedURL, fontSize: fontSize, isDark: isDark)
             try? FileManager.default.removeItem(at: workspace)
             return result
         } catch {
@@ -691,9 +697,16 @@ final class BookRowButton: NSButton {
     var onEditMetadata: ((LibraryBook) -> Void)?
     var onRemove: ((LibraryBook) -> Void)?
     var onRemoveFromCloud: ((LibraryBook) -> Void)?
+    var onHoverChanged: ((Bool) -> Void)?
 
     private let titleLabel: NSTextField
     private let detailLabel: NSTextField
+    private var isHovered = false
+    private var isDark = false
+
+    private var hoverBackgroundColor: NSColor {
+        isDark ? NSColor(calibratedWhite: 0.22, alpha: 1) : NSColor(calibratedWhite: 0.89, alpha: 1)
+    }
 
     init(book: LibraryBook) {
         self.book = book
@@ -780,12 +793,33 @@ final class BookRowButton: NSButton {
         onRemoveFromCloud?(book)
     }
 
+    func setHovered(_ hovered: Bool) {
+        guard hovered != isHovered else { return }
+        isHovered = hovered
+        layer?.backgroundColor = hovered
+            ? hoverBackgroundColor.cgColor
+            : NSColor.clear.cgColor
+    }
+
+    func applyTheme(isDark: Bool) {
+        self.isDark = isDark
+        titleLabel.textColor = isDark
+            ? NSColor(calibratedWhite: 0.9, alpha: 1)
+            : NSColor(calibratedWhite: 0.18, alpha: 1)
+        detailLabel.textColor = isDark
+            ? NSColor(calibratedWhite: 0.58, alpha: 1)
+            : NSColor(calibratedWhite: 0.44, alpha: 1)
+        layer?.backgroundColor = isHovered
+            ? hoverBackgroundColor.cgColor
+            : NSColor.clear.cgColor
+    }
+
     override func mouseEntered(with event: NSEvent) {
-        layer?.backgroundColor = NSColor(calibratedWhite: 0.89, alpha: 1).cgColor
+        onHoverChanged?(true)
     }
 
     override func mouseExited(with event: NSEvent) {
-        layer?.backgroundColor = NSColor.clear.cgColor
+        onHoverChanged?(false)
     }
 
     override func updateTrackingAreas() {
@@ -823,6 +857,7 @@ final class SidebarViewController: NSViewController {
     var onImport: (() -> Void)?
     var onSync: (() -> Void)?
     var onChooseFolder: (() -> Void)?
+    var onToggleSidebar: (() -> Void)?
     var onSelect: ((LibraryBook) -> Void)?
     var onDelete: ((LibraryBook) -> Void)?
     var onEditMetadata: ((LibraryBook) -> Void)?
@@ -830,36 +865,72 @@ final class SidebarViewController: NSViewController {
 
     private let scrollView = NSScrollView()
     private let listContainer = NSView()
+    private let titleLabel = NSTextField(labelWithString: "简阅")
+    private let subtitleLabel = NSTextField(labelWithString: "你的本地阅读空间")
+    private let hideSidebarButton = NSButton()
+    private let importButton = NSButton()
+    private let syncButton = NSButton()
+    private let chooseFolderButton = NSButton()
     private let emptyLabel = NSTextField(labelWithString: "书架还是空的\n把你的第一本书放进来吧")
     private let cloudStatusLabel = NSTextField(labelWithString: "正在检查 iCloud…")
+    private let footerLabel = NSTextField(labelWithString: "支持 TXT · EPUB · PDF\nIntel 原生运行")
     private var rowsByBookID: [UUID: BookRowButton] = [:]
+    private var hoveredRow: BookRowButton?
+    private var scrollObserver: NSObjectProtocol?
+    private var resignKeyObserver: NSObjectProtocol?
+    private var becomeKeyObserver: NSObjectProtocol?
+    private var isDark = false
+    private var hasAppliedTheme = false
+    private var cloudStatusColor: NSColor?
+
+    deinit {
+        if let scrollObserver {
+            NotificationCenter.default.removeObserver(scrollObserver)
+        }
+        if let resignKeyObserver {
+            NotificationCenter.default.removeObserver(resignKeyObserver)
+        }
+        if let becomeKeyObserver {
+            NotificationCenter.default.removeObserver(becomeKeyObserver)
+        }
+    }
 
     override func loadView() {
         let root = NSView()
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor(calibratedWhite: 0.965, alpha: 1).cgColor
 
-        let title = NSTextField(labelWithString: "简阅")
-        title.font = NSFont.systemFont(ofSize: 25, weight: .semibold)
-        title.textColor = NSColor(calibratedWhite: 0.14, alpha: 1)
+        titleLabel.font = NSFont.systemFont(ofSize: 25, weight: .semibold)
+        titleLabel.textColor = NSColor(calibratedWhite: 0.14, alpha: 1)
 
-        let subtitle = NSTextField(labelWithString: "你的本地阅读空间")
-        subtitle.font = NSFont.systemFont(ofSize: 12)
-        subtitle.textColor = NSColor(calibratedWhite: 0.36, alpha: 1)
+        subtitleLabel.font = NSFont.systemFont(ofSize: 12)
+        subtitleLabel.textColor = NSColor(calibratedWhite: 0.36, alpha: 1)
 
-        let importButton = NSButton(title: "导入书籍", target: self, action: #selector(importClicked))
+        hideSidebarButton.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "隐藏书架")
+        hideSidebarButton.imagePosition = .imageOnly
+        hideSidebarButton.isBordered = false
+        hideSidebarButton.contentTintColor = NSColor(calibratedWhite: 0.42, alpha: 1)
+        hideSidebarButton.target = self
+        hideSidebarButton.action = #selector(hideSidebarClicked)
+        hideSidebarButton.toolTip = "隐藏左侧书架（⌘⇧S）"
+
+        importButton.title = "导入书籍"
+        importButton.target = self
+        importButton.action = #selector(importClicked)
         importButton.bezelStyle = .rounded
         importButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         importButton.imagePosition = .imageLeading
-        importButton.keyEquivalent = "o"
-        importButton.keyEquivalentModifierMask = [.command]
 
-        let syncButton = NSButton(title: "同步", target: self, action: #selector(syncClicked))
+        syncButton.title = "同步"
+        syncButton.target = self
+        syncButton.action = #selector(syncClicked)
         syncButton.bezelStyle = .texturedRounded
         syncButton.image = NSImage(systemSymbolName: "icloud.and.arrow.down", accessibilityDescription: nil)
         syncButton.imagePosition = .imageLeading
 
-        let chooseFolderButton = NSButton(title: "位置", target: self, action: #selector(chooseFolderClicked))
+        chooseFolderButton.title = "位置"
+        chooseFolderButton.target = self
+        chooseFolderButton.action = #selector(chooseFolderClicked)
         chooseFolderButton.bezelStyle = .texturedRounded
         chooseFolderButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
         chooseFolderButton.imagePosition = .imageLeading
@@ -868,11 +939,11 @@ final class SidebarViewController: NSViewController {
         actions.orientation = .horizontal
         actions.spacing = 7
 
-        let header = NSStackView(views: [title, subtitle, actions])
+        let header = NSStackView(views: [titleLabel, subtitleLabel, actions])
         header.orientation = .vertical
         header.alignment = .leading
         header.spacing = 5
-        header.setCustomSpacing(16, after: subtitle)
+        header.setCustomSpacing(16, after: subtitleLabel)
 
         listContainer.wantsLayer = true
         listContainer.layer?.backgroundColor = NSColor.clear.cgColor
@@ -887,30 +958,35 @@ final class SidebarViewController: NSViewController {
         emptyLabel.maximumNumberOfLines = 2
         emptyLabel.isHidden = true
 
-        let footer = NSTextField(labelWithString: "支持 TXT · EPUB · PDF\nIntel 原生运行")
-        footer.font = NSFont.systemFont(ofSize: 11)
-        footer.textColor = NSColor(calibratedWhite: 0.48, alpha: 1)
-        footer.maximumNumberOfLines = 2
+        footerLabel.font = NSFont.systemFont(ofSize: 11)
+        footerLabel.textColor = NSColor(calibratedWhite: 0.48, alpha: 1)
+        footerLabel.maximumNumberOfLines = 2
 
         cloudStatusLabel.font = NSFont.systemFont(ofSize: 10)
         cloudStatusLabel.textColor = NSColor(calibratedWhite: 0.48, alpha: 1)
         cloudStatusLabel.lineBreakMode = .byTruncatingTail
 
         root.addSubview(header)
+        root.addSubview(hideSidebarButton)
         root.addSubview(scrollView)
         root.addSubview(emptyLabel)
         root.addSubview(cloudStatusLabel)
-        root.addSubview(footer)
+        root.addSubview(footerLabel)
         header.translatesAutoresizingMaskIntoConstraints = false
+        hideSidebarButton.translatesAutoresizingMaskIntoConstraints = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         cloudStatusLabel.translatesAutoresizingMaskIntoConstraints = false
-        footer.translatesAutoresizingMaskIntoConstraints = false
+        footerLabel.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 30),
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -22),
+            hideSidebarButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            hideSidebarButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            hideSidebarButton.widthAnchor.constraint(equalToConstant: 26),
+            hideSidebarButton.heightAnchor.constraint(equalToConstant: 26),
             scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 22),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
@@ -921,12 +997,36 @@ final class SidebarViewController: NSViewController {
             emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: scrollView.trailingAnchor, constant: -12),
             cloudStatusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22),
             cloudStatusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -22),
-            cloudStatusLabel.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -7),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20)
+            cloudStatusLabel.bottomAnchor.constraint(equalTo: footerLabel.topAnchor, constant: -7),
+            footerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22),
+            footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20)
         ])
 
         view = root
+
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshHoverFromMouse()
+        }
+        resignKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, note.object as? NSWindow === self.view.window else { return }
+            self.setHoveredRow(nil)
+        }
+        becomeKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, note.object as? NSWindow === self.view.window else { return }
+            self.refreshHoverFromMouse()
+        }
     }
 
     override func viewDidLayout() {
@@ -937,9 +1037,11 @@ final class SidebarViewController: NSViewController {
     func reload(books: [LibraryBook], scrollToTop: Bool = false) {
         self.books = books
         rowsByBookID.removeAll()
+        hoveredRow = nil
         listContainer.subviews.forEach { $0.removeFromSuperview() }
         books.forEach { book in
             let row = BookRowButton(book: book)
+            row.applyTheme(isDark: isDark)
             row.onSelect = { [weak self] book in
                 self?.onSelect?(book)
             }
@@ -952,14 +1054,23 @@ final class SidebarViewController: NSViewController {
             row.onRemoveFromCloud = { [weak self] book in
                 self?.onDeleteFromCloud?(book)
             }
+            row.onHoverChanged = { [weak self, weak row] isHovered in
+                guard let self, let row else { return }
+                if isHovered {
+                    self.setHoveredRow(row)
+                } else if self.hoveredRow === row {
+                    self.refreshHoverFromMouse()
+                }
+            }
             row.autoresizingMask = [.width]
             listContainer.addSubview(row)
             rowsByBookID[book.id] = row
         }
         updateListFrame()
         emptyLabel.isHidden = !books.isEmpty
-        if scrollToTop {
-            DispatchQueue.main.async { [weak self] in
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshHoverFromMouse()
+            if scrollToTop {
                 self?.scrollToTop()
             }
         }
@@ -971,9 +1082,54 @@ final class SidebarViewController: NSViewController {
         rowsByBookID[book.id]?.update(book: book)
     }
 
-    func setCloudStatus(_ text: String, color: NSColor = NSColor(calibratedWhite: 0.48, alpha: 1)) {
+    func applyTheme(isDark: Bool) {
+        self.isDark = isDark
+        let shouldRestoreScroll = hasAppliedTheme
+        hasAppliedTheme = true
+        let scrollOrigin = scrollView.contentView.bounds.origin
+        view.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+        view.layer?.backgroundColor = (isDark
+            ? NSColor(calibratedWhite: 0.135, alpha: 1)
+            : NSColor(calibratedWhite: 0.965, alpha: 1)).cgColor
+        titleLabel.textColor = isDark
+            ? NSColor(calibratedWhite: 0.92, alpha: 1)
+            : NSColor(calibratedWhite: 0.14, alpha: 1)
+        subtitleLabel.textColor = isDark
+            ? NSColor(calibratedWhite: 0.6, alpha: 1)
+            : NSColor(calibratedWhite: 0.36, alpha: 1)
+        hideSidebarButton.contentTintColor = isDark
+            ? NSColor(calibratedWhite: 0.62, alpha: 1)
+            : NSColor(calibratedWhite: 0.42, alpha: 1)
+        emptyLabel.textColor = isDark
+            ? NSColor(calibratedWhite: 0.55, alpha: 1)
+            : NSColor(calibratedWhite: 0.42, alpha: 1)
+        footerLabel.textColor = isDark
+            ? NSColor(calibratedWhite: 0.52, alpha: 1)
+            : NSColor(calibratedWhite: 0.48, alpha: 1)
+        cloudStatusLabel.textColor = cloudStatusColor ?? defaultCloudStatusColor
+        listContainer.subviews
+            .compactMap { $0 as? BookRowButton }
+            .forEach { $0.applyTheme(isDark: isDark) }
+        guard shouldRestoreScroll else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let maximumY = max(0, self.listContainer.bounds.height - self.scrollView.contentView.bounds.height)
+            let origin = NSPoint(x: 0, y: min(max(scrollOrigin.y, 0), maximumY))
+            self.scrollView.contentView.scroll(to: origin)
+            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+        }
+    }
+
+    private var defaultCloudStatusColor: NSColor {
+        isDark
+            ? NSColor(calibratedWhite: 0.55, alpha: 1)
+            : NSColor(calibratedWhite: 0.48, alpha: 1)
+    }
+
+    func setCloudStatus(_ text: String, color: NSColor? = nil) {
         cloudStatusLabel.stringValue = text
-        cloudStatusLabel.textColor = color
+        cloudStatusColor = color
+        cloudStatusLabel.textColor = color ?? defaultCloudStatusColor
     }
 
     private func updateListFrame() {
@@ -997,6 +1153,34 @@ final class SidebarViewController: NSViewController {
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
+    private func setHoveredRow(_ row: BookRowButton?) {
+        guard hoveredRow !== row else { return }
+        hoveredRow?.setHovered(false)
+        hoveredRow = row
+        row?.setHovered(true)
+    }
+
+    private func refreshHoverFromMouse() {
+        guard let window = view.window, window.isKeyWindow else {
+            setHoveredRow(nil)
+            return
+        }
+        let pointInWindow = window.mouseLocationOutsideOfEventStream
+        let point = listContainer.convert(pointInWindow, from: nil)
+        guard listContainer.bounds.contains(point) else {
+            setHoveredRow(nil)
+            return
+        }
+        let row = listContainer.subviews
+            .compactMap { $0 as? BookRowButton }
+            .first { $0.frame.contains(point) }
+        setHoveredRow(row)
+    }
+
+    @objc private func hideSidebarClicked() {
+        onToggleSidebar?()
+    }
+
     @objc private func importClicked() {
         onImport?()
     }
@@ -1016,21 +1200,31 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
     private let subtitleLabel = NSTextField(labelWithString: "支持拖入本地文件，内容保存在你的 Mac 上")
     private let contentView = NSView()
     private let emptyState = NSView()
-    private let fontSizeLabel = NSTextField(labelWithString: "18")
-    private let sidebarToggleButton = NSButton()
+    private let fontSizeLabel = NSTextField(labelWithString: "")
+    private let showSidebarButton = NSButton()
+    private let themeButton = NSButton()
+    private let emptyMark = NSTextField(labelWithString: "◌")
+    private let emptyTitleLabel = NSTextField(labelWithString: "安静地读一本书")
+    private let emptySubtitleLabel = NSTextField(labelWithString: "从左侧导入书籍，或直接把文件拖进窗口")
     private var currentBook: LibraryBook?
     private var textView: NSTextView?
     private var pdfView: PDFView?
     private var webView: WKWebView?
     private var webUserContentController: WKUserContentController?
     private var epubRoot: URL?
-    private var fontSize: CGFloat = 18
-    private var isDark = false
+    private var fontSize: CGFloat = {
+        let stored = UserDefaults.standard.double(forKey: "ReaderFontSize")
+        guard stored >= 12, stored <= 32 else { return 18 }
+        return CGFloat(stored)
+    }()
+    private var isDark = UserDefaults.standard.bool(forKey: "ReaderDarkMode")
     private var loadGeneration = 0
     private var currentProgress = 0.0
     private var pdfProgressObserver: NSObjectProtocol?
     var onProgress: ((UUID, Double) -> Void)?
     var onToggleSidebar: (() -> Void)?
+    var onThemeChanged: ((Bool) -> Void)?
+    var isDarkMode: Bool { isDark }
 
     override func loadView() {
         let root = NSView()
@@ -1041,7 +1235,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         titleLabel.textColor = NSColor(calibratedWhite: 0.16, alpha: 1)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.maximumNumberOfLines = 1
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
         subtitleLabel.font = NSFont.systemFont(ofSize: 11)
         subtitleLabel.textColor = NSColor.secondaryLabelColor
@@ -1056,28 +1250,30 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         increase.bezelStyle = .texturedRounded
         fontSizeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         fontSizeLabel.alignment = .center
+        fontSizeLabel.stringValue = "\(Int(fontSize))"
         fontSizeLabel.widthAnchor.constraint(equalToConstant: 28).isActive = true
 
-        let themeButton = NSButton(title: "夜间", target: self, action: #selector(toggleTheme))
+        themeButton.title = "夜间"
         themeButton.bezelStyle = .texturedRounded
         themeButton.image = NSImage(systemSymbolName: "moon", accessibilityDescription: nil)
         themeButton.imagePosition = .imageLeading
+        themeButton.target = self
+        themeButton.action = #selector(toggleTheme)
 
-        sidebarToggleButton.title = "隐藏书架"
-        sidebarToggleButton.bezelStyle = .texturedRounded
-        sidebarToggleButton.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: nil)
-        sidebarToggleButton.imagePosition = .imageLeading
-        sidebarToggleButton.toolTip = "隐藏或显示左侧书架"
-        sidebarToggleButton.keyEquivalent = "s"
-        sidebarToggleButton.keyEquivalentModifierMask = [.command, .shift]
-        sidebarToggleButton.target = self
-        sidebarToggleButton.action = #selector(toggleSidebarRequested)
+        showSidebarButton.title = "显示书架"
+        showSidebarButton.bezelStyle = .texturedRounded
+        showSidebarButton.image = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: nil)
+        showSidebarButton.imagePosition = .imageLeading
+        showSidebarButton.toolTip = "显示左侧书架（⌘⇧S）"
+        showSidebarButton.isHidden = true
+        showSidebarButton.target = self
+        showSidebarButton.action = #selector(toggleSidebarRequested)
 
         let toolbar = NSStackView(views: [
+            showSidebarButton,
             titleLabel,
             subtitleLabel,
             NSView(),
-            sidebarToggleButton,
             decrease,
             fontSizeLabel,
             increase,
@@ -1088,16 +1284,13 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         toolbar.edgeInsets = NSEdgeInsets(top: 0, left: 22, bottom: 0, right: 18)
 
         emptyState.wantsLayer = true
-        let mark = NSTextField(labelWithString: "◌")
-        mark.font = NSFont.systemFont(ofSize: 54, weight: .ultraLight)
-        mark.textColor = NSColor(calibratedRed: 0.25, green: 0.46, blue: 0.37, alpha: 0.42)
-        let emptyTitle = NSTextField(labelWithString: "安静地读一本书")
-        emptyTitle.font = NSFont.systemFont(ofSize: 26, weight: .medium)
-        emptyTitle.textColor = NSColor(calibratedWhite: 0.2, alpha: 1)
-        let emptySubtitle = NSTextField(labelWithString: "从左侧导入书籍，或直接把文件拖进窗口")
-        emptySubtitle.font = NSFont.systemFont(ofSize: 13)
-        emptySubtitle.textColor = NSColor.secondaryLabelColor
-        let emptyStack = NSStackView(views: [mark, emptyTitle, emptySubtitle])
+        emptyMark.font = NSFont.systemFont(ofSize: 54, weight: .ultraLight)
+        emptyMark.textColor = NSColor(calibratedRed: 0.25, green: 0.46, blue: 0.37, alpha: 0.42)
+        emptyTitleLabel.font = NSFont.systemFont(ofSize: 26, weight: .medium)
+        emptyTitleLabel.textColor = NSColor(calibratedWhite: 0.2, alpha: 1)
+        emptySubtitleLabel.font = NSFont.systemFont(ofSize: 13)
+        emptySubtitleLabel.textColor = NSColor.secondaryLabelColor
+        let emptyStack = NSStackView(views: [emptyMark, emptyTitleLabel, emptySubtitleLabel])
         emptyStack.orientation = .vertical
         emptyStack.alignment = .centerX
         emptyStack.spacing = 9
@@ -1130,6 +1323,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         ])
 
         view = root
+        applyThemeAppearance()
         showEmptyState()
     }
 
@@ -1148,14 +1342,16 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         case "TXT":
             showLoading(message: "正在打开 TXT…")
             let url = URL(fileURLWithPath: book.path)
+            let fontSize = self.fontSize
+            let isDark = self.isDark
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 do {
                     let text = try BookImporter.plainText(from: url)
                     let html = try BookImporter.plainTextHTML(
                         title: book.title,
                         text: text,
-                        fontSize: self?.fontSize ?? 18,
-                        isDark: self?.isDark ?? false
+                        fontSize: fontSize,
+                        isDark: isDark
                     )
                     DispatchQueue.main.async {
                         guard let self, self.loadGeneration == generation else { return }
@@ -1185,9 +1381,11 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         case "EPUB":
             showLoading(message: "正在解压 EPUB…")
             let url = URL(fileURLWithPath: book.path)
+            let fontSize = self.fontSize
+            let isDark = self.isDark
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 do {
-                    let result = try BookImporter.epubHTML(from: url)
+                    let result = try BookImporter.epubHTML(from: url, fontSize: fontSize, isDark: isDark)
                     DispatchQueue.main.async {
                         guard let self, self.loadGeneration == generation else { return }
                         self.showEPUB(result: result, progress: book.progress)
@@ -1202,9 +1400,15 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         case "MOBI", "AZW", "AZW3":
             showLoading(message: "正在解析 \(book.format)…\n首次打开可能需要一点时间")
             let url = URL(fileURLWithPath: book.path)
+            let fontSize = self.fontSize
+            let isDark = self.isDark
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 do {
-                    let result = try BookImporter.convertedEPUBHTML(from: url)
+                    let result = try BookImporter.convertedEPUBHTML(
+                        from: url,
+                        fontSize: fontSize,
+                        isDark: isDark
+                    )
                     DispatchQueue.main.async {
                         guard let self, self.loadGeneration == generation else { return }
                         self.showEPUB(result: result, progress: book.progress)
@@ -1277,12 +1481,16 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         currentProgress = min(max(progress, 0), 0.999)
     }
 
+    private var secondaryTextColor: NSColor {
+        isDark ? NSColor(calibratedWhite: 0.64, alpha: 1) : NSColor.secondaryLabelColor
+    }
+
     private func showLoading(message: String) {
-        showMessage(message, color: NSColor.secondaryLabelColor)
+        showMessage(message, color: secondaryTextColor)
     }
 
     private func showUnsupported(message: String) {
-        showMessage(message, color: NSColor.secondaryLabelColor)
+        showMessage(message, color: secondaryTextColor)
     }
 
     private func showMessage(_ message: String, color: NSColor) {
@@ -1346,11 +1554,12 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         currentProgress = 0
         titleLabel.stringValue = "这本书已从 iCloud 文件夹移除"
         subtitleLabel.stringValue = "请重新导入文件，或从左侧选择其他书籍"
-        showMessage("当前书籍文件已不存在\n同步已将它从书架移除", color: NSColor.secondaryLabelColor)
+        showMessage("当前书籍文件已不存在\n同步已将它从书架移除", color: secondaryTextColor)
     }
 
     @objc private func decreaseFont() {
         fontSize = max(12, fontSize - 1)
+        UserDefaults.standard.set(Double(fontSize), forKey: "ReaderFontSize")
         fontSizeLabel.stringValue = "\(Int(fontSize))"
         textView?.font = NSFont(name: "Georgia", size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
         applyWebViewReaderStyle()
@@ -1358,6 +1567,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
 
     @objc private func increaseFont() {
         fontSize = min(32, fontSize + 1)
+        UserDefaults.standard.set(Double(fontSize), forKey: "ReaderFontSize")
         fontSizeLabel.stringValue = "\(Int(fontSize))"
         textView?.font = NSFont(name: "Georgia", size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
         applyWebViewReaderStyle()
@@ -1365,10 +1575,28 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
 
     @objc private func toggleTheme() {
         isDark.toggle()
+        UserDefaults.standard.set(isDark, forKey: "ReaderDarkMode")
+        applyThemeAppearance()
+        onThemeChanged?(isDark)
+    }
+
+    private func applyThemeAppearance() {
+        view.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
         let background = isDark ? NSColor(calibratedWhite: 0.105, alpha: 1) : NSColor(calibratedWhite: 0.99, alpha: 1)
         view.layer?.backgroundColor = background.cgColor
+        titleLabel.textColor = isDark ? NSColor(calibratedWhite: 0.9, alpha: 1) : NSColor(calibratedWhite: 0.16, alpha: 1)
+        subtitleLabel.textColor = isDark ? NSColor(calibratedWhite: 0.62, alpha: 1) : NSColor.secondaryLabelColor
+        fontSizeLabel.textColor = isDark ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor.labelColor
+        emptyMark.textColor = isDark
+            ? NSColor(calibratedRed: 0.48, green: 0.7, blue: 0.6, alpha: 0.5)
+            : NSColor(calibratedRed: 0.25, green: 0.46, blue: 0.37, alpha: 0.42)
+        emptyTitleLabel.textColor = isDark ? NSColor(calibratedWhite: 0.9, alpha: 1) : NSColor(calibratedWhite: 0.2, alpha: 1)
+        emptySubtitleLabel.textColor = isDark ? NSColor(calibratedWhite: 0.62, alpha: 1) : NSColor.secondaryLabelColor
         textView?.textColor = isDark ? NSColor(calibratedWhite: 0.88, alpha: 1) : NSColor(calibratedWhite: 0.22, alpha: 1)
         pdfView?.backgroundColor = isDark ? NSColor(calibratedWhite: 0.1, alpha: 1) : NSColor(calibratedWhite: 0.86, alpha: 1)
+        themeButton.title = isDark ? "日间" : "夜间"
+        themeButton.image = NSImage(systemSymbolName: isDark ? "sun.max" : "moon", accessibilityDescription: nil)
+        themeButton.toolTip = isDark ? "切换到浅色阅读" : "切换到夜间阅读"
         applyWebViewReaderStyle()
     }
 
@@ -1377,26 +1605,23 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
     }
 
     func setSidebarVisible(_ visible: Bool) {
-        sidebarToggleButton.title = visible ? "隐藏书架" : "显示书架"
-        sidebarToggleButton.image = NSImage(
-            systemSymbolName: visible ? "sidebar.left" : "sidebar.right",
-            accessibilityDescription: nil
-        )
-        sidebarToggleButton.toolTip = visible ? "隐藏左侧书架（⌘⇧S）" : "显示左侧书架（⌘⇧S）"
+        showSidebarButton.isHidden = visible
     }
 
-    private func applyWebViewReaderStyle() {
-        guard let webView else { return }
+    private var webReaderStyleScript: String {
         let background = isDark ? "#1b1c1a" : "#f6f5f0"
         let foreground = isDark ? "#e7e4dc" : "#2c302d"
-        let script = """
+        return """
         document.body.style.background='\(background)';
         document.body.style.color='\(foreground)';
         document.body.style.fontSize='\(Int(fontSize))px';
         var page = document.querySelector('.page');
         if (page) { page.style.fontSize='\(Int(fontSize))px'; }
         """
-        webView.evaluateJavaScript(script)
+    }
+
+    private func applyWebViewReaderStyle() {
+        webView?.evaluateJavaScript(webReaderStyleScript)
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -1409,6 +1634,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         let progress = min(max(currentProgress, 0), 0.999)
         let script = """
         (function() {
+          \(webReaderStyleScript)
           var max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
           window.scrollTo(0, max * \(progress));
           if (!window.__intelReaderProgressInstalled) {
@@ -1440,21 +1666,27 @@ final class MainViewController: NSViewController {
     private let store = LibraryStore()
     private let sidebar = SidebarViewController()
     private let reader = ReaderViewController()
-    private var syncTimer: Timer?
+    private let rootView = NSView()
     private let divider = NSView()
     private var sidebarWidthConstraint: NSLayoutConstraint!
     private var dividerWidthConstraint: NSLayoutConstraint!
     private var sidebarVisible = true
     private let minimumContentSize = NSSize(width: 860, height: 560)
+    private let autoSyncMinimumInterval: TimeInterval = 180
+    private var isSyncing = false
+    private var lastSyncDate: Date?
+    private var activationObserver: NSObjectProtocol?
+    private var isDark: Bool { reader.isDarkMode }
 
     deinit {
-        syncTimer?.invalidate()
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+        }
     }
 
     override func loadView() {
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.white.cgColor
+        rootView.wantsLayer = true
+        rootView.layer?.backgroundColor = NSColor.white.cgColor
 
         addChild(sidebar)
         addChild(reader)
@@ -1462,9 +1694,9 @@ final class MainViewController: NSViewController {
         divider.wantsLayer = true
         divider.layer?.backgroundColor = NSColor(calibratedWhite: 0.83, alpha: 1).cgColor
 
-        root.addSubview(sidebar.view)
-        root.addSubview(divider)
-        root.addSubview(reader.view)
+        rootView.addSubview(sidebar.view)
+        rootView.addSubview(divider)
+        rootView.addSubview(reader.view)
 
         sidebar.view.translatesAutoresizingMaskIntoConstraints = false
         divider.translatesAutoresizingMaskIntoConstraints = false
@@ -1472,21 +1704,21 @@ final class MainViewController: NSViewController {
         sidebarWidthConstraint = sidebar.view.widthAnchor.constraint(equalToConstant: 280)
         dividerWidthConstraint = divider.widthAnchor.constraint(equalToConstant: 1)
         NSLayoutConstraint.activate([
-            sidebar.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            sidebar.view.topAnchor.constraint(equalTo: root.topAnchor),
-            sidebar.view.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            sidebar.view.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            sidebar.view.topAnchor.constraint(equalTo: rootView.topAnchor),
+            sidebar.view.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
             sidebarWidthConstraint,
             divider.leadingAnchor.constraint(equalTo: sidebar.view.trailingAnchor),
-            divider.topAnchor.constraint(equalTo: root.topAnchor),
-            divider.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            divider.topAnchor.constraint(equalTo: rootView.topAnchor),
+            divider.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
             dividerWidthConstraint,
             reader.view.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
-            reader.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            reader.view.topAnchor.constraint(equalTo: root.topAnchor),
-            reader.view.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            reader.view.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            reader.view.topAnchor.constraint(equalTo: rootView.topAnchor),
+            reader.view.bottomAnchor.constraint(equalTo: rootView.bottomAnchor)
         ])
 
-        view = root
+        view = rootView
     }
 
     override func viewDidLoad() {
@@ -1494,8 +1726,10 @@ final class MainViewController: NSViewController {
         sidebar.onImport = { [weak self] in self?.importBooks() }
         sidebar.onSync = { [weak self] in self?.syncFromCloud(showStatus: true) }
         sidebar.onChooseFolder = { [weak self] in self?.chooseCloudFolder() }
+        sidebar.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         sidebar.onSelect = { [weak self] book in self?.reader.show(book: book) }
         reader.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
+        reader.onThemeChanged = { [weak self] isDark in self?.applyTheme(isDark: isDark) }
         reader.onProgress = { [weak self] bookID, progress in
             self?.recordProgress(bookID: bookID, progress: progress)
         }
@@ -1513,18 +1747,59 @@ final class MainViewController: NSViewController {
         sidebarVisible = !UserDefaults.standard.bool(forKey: "SidebarHidden")
         reader.setSidebarVisible(sidebarVisible)
         applySidebarVisibility(animated: false)
+        applyTheme(isDark: isDark)
 
         DispatchQueue.main.async { [weak self] in
             self?.syncFromCloud(showStatus: false)
         }
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.syncFromCloud(showStatus: false)
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.syncOnActivation()
         }
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        let appearance = NSAppearance(named: reader.isDarkMode ? .darkAqua : .aqua)
+        NSApp.appearance = appearance
+        view.window?.appearance = appearance
         stabilizeWindow()
+    }
+
+    private func applyTheme(isDark: Bool) {
+        let appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+        NSApp.appearance = appearance
+        view.window?.appearance = appearance
+        rootView.layer?.backgroundColor = (isDark
+            ? NSColor(calibratedWhite: 0.105, alpha: 1)
+            : NSColor.white).cgColor
+        divider.layer?.backgroundColor = (isDark
+            ? NSColor(calibratedWhite: 0.24, alpha: 1)
+            : NSColor(calibratedWhite: 0.83, alpha: 1)).cgColor
+        sidebar.applyTheme(isDark: isDark)
+    }
+
+    private func syncOnActivation() {
+        guard !isSyncing else { return }
+        if let lastSyncDate, Date().timeIntervalSince(lastSyncDate) < autoSyncMinimumInterval {
+            return
+        }
+        syncFromCloud(showStatus: false)
+    }
+
+    @objc func importBooksFromMenu() {
+        importBooks()
+    }
+
+    @objc func syncFromMenu() {
+        syncFromCloud(showStatus: true)
+    }
+
+    @objc func toggleSidebarFromMenu() {
+        toggleSidebar()
     }
 
     private func recordProgress(bookID: UUID, progress: Double) {
@@ -1583,7 +1858,7 @@ final class MainViewController: NSViewController {
         let editorView = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 104))
         let titleCaption = NSTextField(labelWithString: "书名")
         titleCaption.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        titleCaption.textColor = NSColor(calibratedWhite: 0.28, alpha: 1)
+        titleCaption.textColor = NSColor.secondaryLabelColor
         titleCaption.frame = NSRect(x: 0, y: 74, width: 360, height: 18)
 
         let titleField = NSTextField(string: book.title)
@@ -1592,7 +1867,7 @@ final class MainViewController: NSViewController {
 
         let authorCaption = NSTextField(labelWithString: "作者")
         authorCaption.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        authorCaption.textColor = NSColor(calibratedWhite: 0.28, alpha: 1)
+        authorCaption.textColor = NSColor.secondaryLabelColor
         authorCaption.frame = NSRect(x: 0, y: 26, width: 360, height: 18)
 
         let authorField = NSTextField(string: book.author)
@@ -1734,21 +2009,44 @@ final class MainViewController: NSViewController {
     }
 
     private func syncFromCloud(showStatus: Bool) {
+        guard !isSyncing else { return }
+        isSyncing = true
+        lastSyncDate = Date()
         if showStatus {
             sidebar.setCloudStatus("iCloud：正在同步…")
         }
+
+        let existingPaths = Set(store.books.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+        let authorCandidatePaths = Set(
+            store.books
+                .filter { $0.author.isEmpty }
+                .map { URL(fileURLWithPath: $0.path).standardizedFileURL.path }
+        )
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let sync = CloudFolderSync.shared
             let urls = sync.bookURLs()
             urls.forEach { sync.prepareForReading($0) }
-            let scannedBooks = urls.map { BookImporter.book(from: $0) }
+
+            let urlsByPath = Dictionary(
+                urls.map { ($0.standardizedFileURL.path, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            let newBooks = urls
+                .filter { !existingPaths.contains($0.standardizedFileURL.path) }
+                .map { BookImporter.book(from: $0) }
+            let inferredAuthors: [(path: String, author: String)] = authorCandidatePaths.compactMap { path in
+                guard let url = urlsByPath[path] else { return nil }
+                let author = BookImporter.inferredAuthor(from: url)
+                return author.isEmpty ? nil : (path, author)
+            }
 
             DispatchQueue.main.async {
-                let cloudPaths = Set(urls.map { $0.standardizedFileURL.path })
+                let syncAvailable = sync.isAvailable
+                let cloudPaths = Set(urlsByPath.keys)
                 let staleBooks: [LibraryBook]
-                if sync.isAvailable {
+                if syncAvailable {
                     staleBooks = self.store.books.filter { book in
                         sync.contains(URL(fileURLWithPath: book.path)) &&
                         !cloudPaths.contains(URL(fileURLWithPath: book.path).standardizedFileURL.path)
@@ -1763,23 +2061,31 @@ final class MainViewController: NSViewController {
                     staleBooks.forEach { self.reader.handleBookRemoved(path: $0.path) }
                 }
 
+                var currentPaths = Set(
+                    self.store.books.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path }
+                )
                 var addedCount = 0
-                scannedBooks.forEach { scannedBook in
-                    guard let existing = self.store.books.first(where: { $0.path == scannedBook.path }) else {
-                        self.store.add(scannedBook)
-                        addedCount += 1
+                newBooks.forEach { book in
+                    let path = URL(fileURLWithPath: book.path).standardizedFileURL.path
+                    guard !currentPaths.contains(path) else { return }
+                    self.store.add(book)
+                    currentPaths.insert(path)
+                    addedCount += 1
+                }
+
+                inferredAuthors.forEach { entry in
+                    guard let existing = self.store.books.first(where: {
+                        URL(fileURLWithPath: $0.path).standardizedFileURL.path == entry.path
+                    }), existing.author.isEmpty else {
                         return
                     }
-                    if existing.author.isEmpty && !scannedBook.author.isEmpty {
-                        var updated = existing
-                        updated.author = scannedBook.author
-                        self.store.update(updated)
-                        self.sidebar.refresh(book: updated)
-                    }
+                    var updated = existing
+                    updated.author = entry.author
+                    self.store.update(updated)
                 }
                 self.sidebar.reload(books: self.store.books, scrollToTop: addedCount > 0)
 
-                if !sync.isAvailable {
+                if !syncAvailable {
                     self.sidebar.setCloudStatus("iCloud：未找到文件夹，请点击“位置”选择", color: .systemOrange)
                 } else if addedCount > 0 || !staleBooks.isEmpty {
                     var changes: [String] = []
@@ -1793,6 +2099,7 @@ final class MainViewController: NSViewController {
                 } else {
                     self.sidebar.setCloudStatus("iCloud：已同步 · \(urls.count) 本")
                 }
+                self.isSyncing = false
             }
         }
     }
@@ -1827,14 +2134,17 @@ final class MainViewController: NSViewController {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private static let windowFrameKey = "MainWindowFrame"
     private var window: NSWindow!
     private var mainViewController: MainViewController!
     private var pendingOpenURLs: [URL] = []
+    private var isWindowReady = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let initialDark = UserDefaults.standard.bool(forKey: "ReaderDarkMode")
         NSApp.setActivationPolicy(.regular)
-        NSApp.appearance = NSAppearance(named: .aqua)
+        NSApp.appearance = NSAppearance(named: initialDark ? .darkAqua : .aqua)
         mainViewController = MainViewController()
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
@@ -1844,19 +2154,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "简阅"
         window.titleVisibility = .hidden
-        window.appearance = NSAppearance(named: .aqua)
+        window.appearance = NSAppearance(named: initialDark ? .darkAqua : .aqua)
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName("IntelReader.MainWindow")
+        window.isRestorable = false
+        window.delegate = self
         window.contentViewController = mainViewController
-        window.center()
         window.contentMinSize = NSSize(width: 860, height: 560)
         window.minSize = window.frameRect(
             forContentRect: NSRect(x: 0, y: 0, width: 860, height: 560)
         ).size
+        restoreWindowFrame()
+        isWindowReady = true
+        buildMainMenu()
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         processPendingOpenURLs()
+    }
+
+    private func restoreWindowFrame() {
+        let minimumFrame = window.frameRect(
+            forContentRect: NSRect(x: 0, y: 0, width: 860, height: 560)
+        ).size
+        if let raw = UserDefaults.standard.array(forKey: Self.windowFrameKey),
+           let stored = Self.frame(from: raw) {
+            var frame = NSRect(
+                x: stored.origin.x,
+                y: stored.origin.y,
+                width: max(stored.width, minimumFrame.width),
+                height: max(stored.height, minimumFrame.height)
+            )
+            if let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(frame) }) ?? NSScreen.main {
+                let visible = screen.visibleFrame
+                frame.size.width = min(frame.width, visible.width)
+                frame.size.height = min(frame.height, visible.height)
+                frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+                frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+                window.setFrame(frame, display: false)
+                saveWindowFrame()
+                return
+            }
+        }
+        window.setContentSize(NSSize(width: 1180, height: 760))
+        window.center()
+        saveWindowFrame()
+    }
+
+    private static func frame(from raw: [Any]) -> NSRect? {
+        guard raw.count == 4 else { return nil }
+        let values: [Double] = raw.compactMap { item in
+            if let number = item as? NSNumber {
+                return number.doubleValue
+            }
+            if let string = item as? String {
+                return Double(string)
+            }
+            return nil
+        }
+        guard values.count == 4, values[2] > 0, values[3] > 0 else { return nil }
+        return NSRect(x: values[0], y: values[1], width: values[2], height: values[3])
+    }
+
+    private func saveWindowFrame() {
+        guard let window else { return }
+        let frame = window.frame
+        guard frame.width > 0, frame.height > 0 else { return }
+        UserDefaults.standard.set(
+            [Double(frame.origin.x), Double(frame.origin.y), Double(frame.width), Double(frame.height)],
+            forKey: Self.windowFrameKey
+        )
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard isWindowReady else { return }
+        saveWindowFrame()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard isWindowReady else { return }
+        saveWindowFrame()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        saveWindowFrame()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        saveWindowFrame()
+    }
+
+    func application(_ application: NSApplication, shouldSaveApplicationState coder: NSCoder) -> Bool {
+        false
+    }
+
+    func application(_ application: NSApplication, shouldRestoreApplicationState coder: NSCoder) -> Bool {
+        false
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -1875,6 +2267,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    private func buildMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem(title: "简阅", action: nil, keyEquivalent: "")
+        let appMenu = NSMenu(title: "简阅")
+        let aboutItem = NSMenuItem(
+            title: "关于简阅",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        aboutItem.target = NSApp
+        appMenu.addItem(aboutItem)
+        appMenu.addItem(.separator())
+
+        let hideItem = NSMenuItem(title: "隐藏简阅", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hideItem.target = NSApp
+        appMenu.addItem(hideItem)
+
+        let hideOthersItem = NSMenuItem(
+            title: "隐藏其他",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthersItem.keyEquivalentModifierMask = [.command, .option]
+        hideOthersItem.target = NSApp
+        appMenu.addItem(hideOthersItem)
+
+        let showAllItem = NSMenuItem(
+            title: "显示全部",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: ""
+        )
+        showAllItem.target = NSApp
+        appMenu.addItem(showAllItem)
+        appMenu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "退出简阅", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApp
+        appMenu.addItem(quitItem)
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let fileMenuItem = NSMenuItem(title: "文件", action: nil, keyEquivalent: "")
+        let fileMenu = NSMenu(title: "文件")
+        let importItem = NSMenuItem(
+            title: "导入书籍…",
+            action: #selector(MainViewController.importBooksFromMenu),
+            keyEquivalent: "o"
+        )
+        importItem.target = mainViewController
+        fileMenu.addItem(importItem)
+
+        let syncItem = NSMenuItem(
+            title: "同步 iCloud",
+            action: #selector(MainViewController.syncFromMenu),
+            keyEquivalent: "r"
+        )
+        syncItem.target = mainViewController
+        fileMenu.addItem(syncItem)
+        fileMenuItem.submenu = fileMenu
+        mainMenu.addItem(fileMenuItem)
+
+        let editMenuItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = NSMenuItem(title: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: Selector(("cut:")), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: Selector(("copy:")), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: Selector(("paste:")), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: Selector(("selectAll:")), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        let viewMenuItem = NSMenuItem(title: "显示", action: nil, keyEquivalent: "")
+        let viewMenu = NSMenu(title: "显示")
+        let toggleSidebarItem = NSMenuItem(
+            title: "显示/隐藏书架",
+            action: #selector(MainViewController.toggleSidebarFromMenu),
+            keyEquivalent: "s"
+        )
+        toggleSidebarItem.keyEquivalentModifierMask = [.command, .shift]
+        toggleSidebarItem.target = mainViewController
+        viewMenu.addItem(toggleSidebarItem)
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func enqueueOpenURLs(_ urls: [URL]) {
