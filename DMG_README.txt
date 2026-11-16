@@ -8,8 +8,8 @@ EasyRead (Intel Mac) Installation Guide
    If macOS says the developer cannot be verified, right-click the app in Finder,
    choose “打开” (Open), and confirm “打开” (Open).
 
-3. EasyRead 支持 TXT、EPUB、PDF；MOBI、AZW、AZW3 需要另外安装 Calibre。
-   EasyRead supports TXT, EPUB, and PDF. MOBI, AZW, and AZW3 also require Calibre.
+3. EasyRead 支持 TXT、Markdown、EPUB、PDF、MOBI、AZW、AZW3、FB2、CBZ、RTF、DOCX，全部格式都内置解码，无需安装 Calibre 或其他软件。
+   EasyRead supports TXT, Markdown, EPUB, PDF, MOBI, AZW, AZW3, FB2, CBZ, RTF, and DOCX. Every format is decoded inside the app; no Calibre or other software is required.
 
 4. 本版本是 Intel（x86_64）构建，要求 macOS 12 或更高版本。
    This build targets Intel (x86_64) Macs and requires macOS 12 or later.

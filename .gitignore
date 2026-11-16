@@ -1,3 +1,4 @@
 .DS_Store
 build/
 outputs/EasyRead-Intel.dmg
+outputs/EasyRead-Intel-*.dmg
