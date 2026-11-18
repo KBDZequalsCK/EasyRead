@@ -12,7 +12,7 @@ The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.co
 
 - Import and manage TXT, Markdown, EPUB, PDF, MOBI, AZW, AZW3, FB2, CBZ, RTF, and DOCX books
 - Two peer libraries, one active at a time: the **folder library** and the **WebDAV library**; each has its own full bookshelf
-- The folder library is free forever. The WebDAV library is a one-time **¥8 EasyRead Pro** unlock; license codes are verified offline (Ed25519) and stored on this Mac, with no account or license server required
+- The folder library is free forever. The WebDAV library is a one-time **¥8 EasyRead Pro** unlock; license codes bind to the first Mac that activates them and are verified offline (Ed25519), with no account or license server required
 - The folder library reads one folder on this Mac or in iCloud Drive. The old separate iCloud and local shelves are merged into it automatically, and the chooser remembers the last folder
 - Switch libraries from the bar above the book list; switching never mixes the two shelves
 - **清理书架** next to the 简阅 title clears only the active library's shelf records; book files and cloud snapshots stay untouched
@@ -43,6 +43,7 @@ The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.co
 - Since 0.9.3 text-book tables of contents normalize CR/CRLF line endings before taking the chapter title, so Windows-style TXT files no longer show a whole preview as the title. Chapter jumps use the same native find as search with the first line as locator, and the page indicator refreshes immediately after the jump
 - Since 0.9.4 paged PDFs save the page the reader is actually looking at: progress reporting is throttled by page instead of one percent, so a 265-page document no longer keeps an old `currentProgress` under one percent per page. Bookmarks read `PDFView.currentPage` directly, and TOC/bookmark jumps refresh the page indicator immediately instead of being suppressed by the restore guard. Toggling “use publisher layout” on an EPUB now captures the live pager position first, so a 612-page book stays at the same passage instead of returning to page 1; TOC anchor jumps also report their new position right away. Verified with a 265-page PDF (TOC jump to `24 / 265`, bookmark `pageIndex 23`, restart restores `24 / 265`) and a 612-page EPUB (`5 / 486 → 6 / 612` across the layout switch). The same release removes the pause when showing or hiding the bookshelf: the frozen column grid and page count stay unchanged while only the visible frame moves, so the transition no longer reflows the book or leaks half of the previous page
 - Since 0.9.5 the iCloud shelf and the local-folder shelf are one **folder library**: one chosen folder, one shelf, with the old records migrated automatically. WebDAV settings no longer assume a `ZenReader/v1` directory: **EasyRead (Default)** is used for new setups, the folder is created on the first sync, and **ZenReader (Compatible)** remains available for phone interoperability. The server field now takes only the account root, and the provider picker covers Jianguoyun, Nextcloud, InfiniCLOUD, Synology, and custom WebDAV servers. Switching the cloud folder affects later syncs only; the other folder is left untouched
+- Since 0.9.6 the EasyRead Pro purchase button is live and opens the 爱发电 product. A code binds to the first Mac that activates it; only a one-way SHA-256 hash of the host UUID is stored, and later launches verify it offline. This is a local anti-copying measure, not a server-enforced one-device lock: someone holding the raw code can still activate it on another Mac. Re-entering the code or contacting the developer handles a legitimate move to a new Mac
 - Remember the folder library location and reopen the chooser there
 - Copy books imported from Finder into the folder library when it lives in iCloud Drive; a plain Mac folder is referenced in place
 - TXT reading with font-size controls, dark mode, and long-text scrolling
@@ -117,13 +118,9 @@ The folder library, imports, reading, bookmarks, and notes are free. The WebDAV 
 
 Support the project on 爱发电: <https://ifdian.net/a/easyread>
 
-Create a ¥8 product on **爱发电** (preferred, because it has order Webhooks and batch automatic replies) or **面包多**, then put the product URL in `Info.plist`:
+The live product is **EasyRead Pro（WebDAV 书库解锁）**: <https://ifdian.net/item/433d9ac0e31111f181f552540025c377>. The purchase button opens this URL; it is stored in `Info.plist → EasyReadProPurchaseURL`. The listing costs ¥8 and allows repeat purchases. 爱发电's automatic random reply issues one code per order, so buy one order per Mac.
 
-```text
-Info.plist → EasyReadProPurchaseURL
-```
-
-Rebuild after changing it. The Pro window opens that URL; license codes are verified fully offline, so activation needs no account, order lookup, or license server.
+License codes are verified offline, so activation needs no account, order lookup, or license server. On first activation the code binds to this Mac: the app stores only a SHA-256 hash of the host UUID and checks it on later launches. This is a local anti-copying measure, not a server-enforced one-device lock. To move to a new Mac, enter the code there or contact the developer.
 
 Issuing codes:
 
@@ -138,12 +135,10 @@ The private key is created at `~/.easyread-license/private.key` and must never b
 
 Recommended 爱发电 workflow:
 
-1. Create a ¥8 one-time product/plan for EasyRead Pro.
-2. Enable automatic delivery / “自动随机回复” for that plan and paste every line from one generated batch as one code.
-3. Buy one test order and confirm a unique code arrives before uploading a large batch; replenish the code list before it runs out. 爱发电 charges 6% in total (5% platform + 1% payment channel), so the creator receives about 94%.
-4. Put the product URL into `Info.plist` and rebuild.
-
-If the platform's automatic reply reuses lines instead of issuing one code per order, use its order Webhook plus a small server to sign one code per paid order, or deliver codes manually. Codes are not device-bound; treat them as software keys and do not share them.
+1. Keep one line per code in “自动随机回复”; the platform shows the remaining count.
+2. Confirm a unique code is delivered for each paid order, then replenish the batch before it runs out. 爱发电 charges 6% in total (5% platform + 1% payment channel), so the creator receives about 94%.
+3. If the automatic reply ever reuses a line, switch to its order Webhook plus a small signing service, or deliver codes manually.
+4. Update `Info.plist` and rebuild only when the product URL or the license scheme changes.
 
 The developer code is generated with `--order DEVELOPER`. On this Mac it is stored outside the repository at `~/.easyread-license/developer-license.txt` and is already activated, so the developer does not need to buy a code.
 
@@ -224,7 +219,7 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 - 书架记录保存在 `~/Library/Application Support/IntelReader/library.json`
 - 自动读取 iCloud Drive 中的 `极简阅读` 文件夹，在启动、手动同步或回到前台（距上次同步超过 3 分钟）时扫描
 - 书库栏只保留两个同级入口：**书库**（一个文件夹）与 **WebDAV 书库**，各自拥有独立书架；旧的 iCloud 书库和本地书库记录会在首次启动时自动合并进“书库”
-- “书库”（本地文件夹或 iCloud Drive）永久免费；**WebDAV 书库**是 ¥8 的 **EasyRead Pro** 一次性解锁，包含 WebDAV 书架、同步设置、上传 / 下载和自动同步。授权码用 Ed25519 离线校验并保存在本机，不需要账号或授权服务器
+- “书库”（本地文件夹或 iCloud Drive）永久免费；**WebDAV 书库**是 ¥8 的 **EasyRead Pro** 一次性解锁，包含 WebDAV 书架、同步设置、上传 / 下载和自动同步。授权码首次激活后绑定当前 Mac，并用 Ed25519 离线校验；本机只保存主机 UUID 的单向哈希，不需要账号或授权服务器
 - 坚果云、Nextcloud、InfiniCLOUD、群晖以及任意自定义 WebDAV 都可作为完整云端书库，书库栏提供“上传 / 下载”两个方向按钮：上传把本机书籍和这台 Mac 的阅读进度推到云端，下载把云端书籍和进度取回本机；每次只新建一份快照，绝不覆盖旧快照
 - WebDAV 设置提供“服务商”选择和“EasyRead（默认）/ ZenReader（兼容）”云端目录选择；服务器地址只填账号根目录，EasyRead 目录不存在时首次同步自动创建，只有需要和 iPhone 上的极简阅读互通时才选 ZenReader/v1。切换目录只影响之后的同步，不会移动或删除另一个目录里的文件
 - 书籍文件按极简阅读的原生布局存放：`objects/books/<内容 SHA-256>.<扩展名>`，快照条目通过 `extraJSON.webdav.path` 指向真实对象，`fileSize` 为原始字节数字符串；EasyRead 按此格式读取，并以同样格式上传
@@ -254,6 +249,7 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 - 0.9.4 起修复分页 PDF 与 EPUB 排版切换：PDF 进度改为按页节流，265 页文档翻一页不再被 1% 阈值吞掉；书签直接读当前可见页，目录/书签跳转后页码立即刷新（验证：目录跳到 `24 / 265`，⌘D 保存 `pageIndex 23`，重启仍回到第 24 页）。EPUB 开关“使用出版方排版”前先读取当前阅读位置，612 页的大书在 `5 / 486 ↔ 6 / 612` 之间切换仍停在原段落，不再回到空白第 1 页；目录锚点跳转也会立即写入阅读进度。同一版本还修复了书架显示/隐藏时的卡顿与“一页半”残影：冻结分栏网格和总页数不变，只移动可见窗口，切换不再整书重排，也不会露出上一页的半页内容
 - 0.9.5 起把 iCloud 书库与本地书库合并为一个“书库”：只选择一个文件夹、维护一份书架，旧记录自动迁移；WebDAV 设置不再假定存在 `ZenReader/v1`，新用户默认使用自动创建的 `EasyRead` 目录，需要与手机互通时仍可选 `ZenReader/v1`。服务器地址只填账号根目录，服务商可选坚果云、Nextcloud、InfiniCLOUD、群晖或自定义 WebDAV；切换云端目录只影响之后的同步，另一个目录里的文件不会被移动或删除
 - 0.9.5 起目录、启动与字号体验改进：合集类书籍的目录按其中的每本书分组，默认只展开正在阅读的那一本并展开其章节，同时滚动到并高亮当前章节；展开和收起按钮使用同一个 `chevron.right` 字形旋转而成，两种状态视觉大小一致。字号 A+/A− 会立即改变正文显示，只在停止点击 170 ms 后重新分页一次，连续点击不会排队等待。启动 App 后不再自动打开上次的书，而是停留在空阅读页，直到在书架手动选择一本
+- 0.9.6 起 EasyRead Pro 的购买按钮已启用，直接打开已上架的爱发电商品。授权码首次激活时绑定当前 Mac：本机只保存主机 UUID 的 SHA-256 单向哈希，之后离线校验。这个绑定是本地防拷贝措施，不是服务器强制的“一码一机”；拿到原始授权码的人仍可在另一台 Mac 上重新激活。正常换机时重新输入授权码或联系作者处理
 - 无论书库使用 iCloud Drive 文件夹还是这台 Mac 的普通文件夹，都会记住上一次选择，下次打开选择器直接回到该位置；点“扫描”刷新书籍
 - 从 Mac 导入的书籍在书库位于 iCloud Drive 时会复制进该文件夹；普通 Mac 文件夹则直接引用原文件，不复制
 - TXT 阅读：字号调整、夜间模式（覆盖书架、标题栏与阅读区）、长文本滚动；按自然段渲染，长篇小说分栏和翻页更快
@@ -328,11 +324,13 @@ MOBI、AZW、AZW3 文件由内置解析器在后台线程解码，图片只写�
 
 ## EasyRead Pro（¥8 解锁 WebDAV）
 
-“书库”（本地文件夹或 iCloud Drive）永久免费，WebDAV 书库需一次性购买 **EasyRead Pro（¥8）**。Pro 包含 WebDAV 书架、同步设置、上传 / 下载和自动同步；授权码在本机离线校验，不需要注册账号或联网激活。
+“书库”（本地文件夹或 iCloud Drive）永久免费，WebDAV 书库需一次性购买 **EasyRead Pro（¥8）**。Pro 包含 WebDAV 书架、同步设置、上传 / 下载和自动同步；授权码在本机离线校验，不需要注册账号。
 
 支持作者 / 爱发电主页：<https://ifdian.net/a/easyread>
 
-购买链接配置：在**爱发电**（优先，支持订单 Webhook 和批量自动回复）或**面包多**创建 ¥8 商品，把商品链接填入 `Info.plist` 的 `EasyReadProPurchaseURL`，然后重新构建。链接为空时，Pro 窗口的购买按钮会提示“购买链接尚未配置”。
+商品已上架：**EasyRead Pro（WebDAV 书库解锁）** <https://ifdian.net/item/433d9ac0e31111f181f552540025c377>。App 内的购买按钮打开该链接，地址保存在 `Info.plist` 的 `EasyReadProPurchaseURL`。商品售价 ¥8，通过爱发电“自动随机回复”自动发码，不限制购买数量；每笔订单发一条授权码，多台 Mac 请分多次下单，每次购买 1 份。
+
+授权码首次激活后会绑定当前 Mac：本机只保存主机 UUID 的 SHA-256 单向哈希，之后每次启动离线校验。这是防拷贝的本地措施，不是服务器强制的“一码一机”；拿到原始授权码的人仍可在另一台 Mac 上重新激活。换机时重新输入授权码，或联系作者处理。
 
 签发授权码：
 
@@ -347,12 +345,10 @@ swiftc -O -target x86_64-apple-macos12.0 Tools/LicenseTool.swift -o /tmp/easyrea
 
 推荐的**爱发电**流程：
 
-1. 创建一个 ¥8 的一次性商品 / 方案。
-2. 开启自动发货 /“自动随机回复”，把一批授权码按每行一个粘贴进去。
-3. 先买一笔测试订单，确认收到的是唯一授权码，再上传大批量；快用完前补充新码。爱发电总计抽 6%（平台 5% + 支付通道 1%），创作者到账约 94%。
-4. 把商品链接写入 `Info.plist` 后重新构建。
-
-如果平台的自动回复会重复使用同一行而不是每单发一个新码，就改用订单 Webhook 加一个小服务，为每笔已付款订单单独签发授权码，或者手动发货。授权码不绑定设备，请像软件序列号一样妥善保管。
+1. 在“自动随机回复”里保持每行一个授权码，平台会显示剩余数量。
+2. 确认每笔已付款订单都收到唯一授权码；快用完前补充新码。爱发电总计抽 6%（平台 5% + 支付通道 1%），创作者到账约 94%。
+3. 如果自动回复出现重复使用同一行的情况，就改用订单 Webhook 加一个小型签发服务，或手动发货。
+4. 只有商品链接或授权方案变化时，才需要更新 `Info.plist` 并重新构建。
 
 开发者授权码用 `--order DEVELOPER` 生成。本机已激活的开发者码保存在仓库外的 `~/.easyread-license/developer-license.txt`，开发者无需购买。
 
@@ -386,7 +382,7 @@ swiftc -O -target x86_64-apple-macos12.0 Tools/LicenseTool.swift -o /tmp/easyrea
 
 WebDAV 不只是进度通道，而是与“书库”同级的完整云端书库，支持**坚果云、Nextcloud、InfiniCLOUD、群晖**以及任意标准 **自定义 WebDAV** 服务。服务器地址只填**账号根目录**，EasyRead 会自己追加所选云端目录。
 
-WebDAV 书库需要一次性解锁 **EasyRead Pro**。选择 **书库 → 解锁 EasyRead Pro（¥8）…**，或点击带锁的“WebDAV 书库”入口，输入授权码即可；不需要账号，也不联网激活。
+WebDAV 书库需要一次性解锁 **EasyRead Pro**。选择 **书库 → 解锁 EasyRead Pro（¥8）…**，或点击带锁的“WebDAV 书库”入口，输入授权码即可；首次激活会绑定当前 Mac，之后离线校验，不需要账号。
 
 云端目录有两种：
 

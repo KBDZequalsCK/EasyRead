@@ -69,12 +69,28 @@ final class ProLicenseManager {
 
     private static let licensePrefix = "ERPRO1"
     private static let defaultsKey = "EasyReadProLicense"
+    private static let deviceBindingKey = "EasyReadProLicenseDevice"
     // Ed25519 public key. The matching private key is intentionally kept
     // outside this repository (default: ~/.easyread-license/private.key).
     private static let publicKeyBase64 = "dLfepSvGfcOIPUuBiTjaoWeCcEl4kFCjYh13zZBFWbQ="
 
     private(set) var payload: ProLicensePayload?
     private(set) var rawLicense: String?
+    private(set) var didRemoveMismatchedLicense = false
+
+    /// A stable, non-reversible identifier for this Mac. The raw hardware UUID
+    /// never leaves the process and is not written to preferences.
+    private static var currentDeviceBinding: String? {
+        var hostUUID: uuid_t = UUID().uuid
+        var timeout = timespec(tv_sec: 0, tv_nsec: 0)
+        let status = withUnsafeMutablePointer(to: &hostUUID) {
+            gethostuuid($0, &timeout)
+        }
+        guard status == 0 else { return nil }
+        let identifier = UUID(uuid: hostUUID).uuidString.lowercased()
+        let digest = SHA256.hash(data: Data(("easyread.pro.webdav|" + identifier).utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
 
     var isPro: Bool {
         payload != nil
@@ -91,10 +107,29 @@ final class ProLicenseManager {
         }
         switch Self.verify(stored) {
         case .success(let payload):
+            if let currentBinding = Self.currentDeviceBinding {
+                let storedBinding = UserDefaults.standard.string(forKey: Self.deviceBindingKey)
+                if let storedBinding, !storedBinding.isEmpty,
+                   storedBinding != currentBinding {
+                    // The saved code was activated on another Mac (or this
+                    // Mac's identity changed). Do not keep a license that is
+                    // bound elsewhere; the user can activate again here.
+                    didRemoveMismatchedLicense = true
+                    UserDefaults.standard.removeObject(forKey: Self.defaultsKey)
+                    UserDefaults.standard.removeObject(forKey: Self.deviceBindingKey)
+                    return
+                }
+                if storedBinding?.isEmpty != false {
+                    // Upgrading from a build without device binding: bind the
+                    // existing license to this Mac silently once.
+                    UserDefaults.standard.set(currentBinding, forKey: Self.deviceBindingKey)
+                }
+            }
             self.payload = payload
             self.rawLicense = Self.normalize(stored)
         case .failure:
             UserDefaults.standard.removeObject(forKey: Self.defaultsKey)
+            UserDefaults.standard.removeObject(forKey: Self.deviceBindingKey)
         }
     }
 
@@ -103,8 +138,12 @@ final class ProLicenseManager {
         let normalized = Self.normalize(code)
         switch Self.verify(normalized) {
         case .success(let payload):
+            if let currentBinding = Self.currentDeviceBinding {
+                UserDefaults.standard.set(currentBinding, forKey: Self.deviceBindingKey)
+            }
             self.payload = payload
             self.rawLicense = normalized
+            self.didRemoveMismatchedLicense = false
             UserDefaults.standard.set(normalized, forKey: Self.defaultsKey)
             NotificationCenter.default.post(name: .proLicenseDidChange, object: self)
             return .success(payload)
@@ -284,8 +323,8 @@ final class ProUnlockWindowController: NSWindowController, NSTextFieldDelegate {
         closeButton.action = #selector(closeClicked)
 
         let footerLabel = NSTextField(wrappingLabelWithString: L(
-            "授权码在本机离线验证，不需要登录。购买与激活只解锁 WebDAV 书库；本地书库、导入和阅读进度始终免费。",
-            "License codes are verified offline on this Mac and need no account. Buying Pro only unlocks the WebDAV library; the local library, imports, and reading progress stay free."
+            "授权码首次激活后会绑定当前 Mac，之后在本机离线验证，不需要登录。购买与激活只解锁 WebDAV 书库；本地书库、导入和阅读进度始终免费。",
+            "A license code binds to this Mac on first activation, then is verified offline with no account. Buying Pro only unlocks the WebDAV library; the local library, imports, and reading progress stay free."
         ))
         footerLabel.font = NSFont.systemFont(ofSize: 10)
         footerLabel.textColor = .secondaryLabelColor
@@ -406,10 +445,10 @@ final class ProUnlockWindowController: NSWindowController, NSTextFieldDelegate {
             stateLabel.textColor = .systemGreen
             priceLabel.stringValue = L("永久授权", "Lifetime")
             if let id = manager.licenseIDDescription {
-                detailLabel.stringValue = L("授权 ID：\(id)… · 已在本机离线验证",
-                                            "License ID: \(id)… · Verified offline on this Mac")
+                detailLabel.stringValue = L("授权 ID：\(id)… · 已绑定此 Mac",
+                                            "License ID: \(id)… · Bound to this Mac")
             } else {
-                detailLabel.stringValue = L("已在本机离线验证。", "Verified offline on this Mac.")
+                detailLabel.stringValue = L("已绑定此 Mac。", "Bound to this Mac.")
             }
             purchaseButton.isHidden = true
             licenseField.placeholderString = L("粘贴新的授权码可替换当前授权",
@@ -424,10 +463,17 @@ final class ProUnlockWindowController: NSWindowController, NSTextFieldDelegate {
             stateLabel.textColor = .labelColor
             priceLabel.stringValue = L("\(ProLicenseManager.priceDisplay) · 永久",
                                        "\(ProLicenseManager.priceDisplay) · Lifetime")
-            detailLabel.stringValue = L(
-                "购买后会把授权码发给你；粘贴到下面即可解锁，不需要注册账号。",
-                "After purchase you will receive a license code. Paste it below to unlock; no account is required."
-            )
+            if manager.didRemoveMismatchedLicense {
+                detailLabel.stringValue = L(
+                    "此前保存的授权码已绑定另一台 Mac，已从本机移除。请重新输入授权码，或联系作者处理换机。",
+                    "The saved license was bound to another Mac and has been removed here. Enter the code again, or contact the developer about moving it."
+                )
+            } else {
+                detailLabel.stringValue = L(
+                    "购买后会把授权码发给你；粘贴到下面即可解锁并绑定此 Mac，不需要注册账号。",
+                    "After purchase you will receive a license code. Paste it below to unlock and bind it to this Mac; no account is required."
+                )
+            }
             purchaseButton.isHidden = false
             licenseField.placeholderString = L("粘贴以 ERPRO1. 开头的授权码",
                                                "Paste a license code starting with ERPRO1.")
