@@ -1657,6 +1657,32 @@ enum ReaderPagerScript {
       scheduleVerticalRecheck(360);
     };
 
+    // A font change only needs the new size to become visible; the expensive
+    // full re-columnization can wait until the user stops clicking. Every
+    // click used to capture the position and re-layout synchronously, so a
+    // quick A+/A− burst queued several whole-book layouts and the text took
+    // seconds to settle. Apply the CSS at once and coalesce the reflow.
+    var pendingFontTimer = null;
+    var pendingFontPosition = null;
+    P.applyFontSize = function (size) {
+      if (typeof size !== 'number' || !isFinite(size) || size <= 0) { return; }
+      if (!pendingFontTimer) {
+        pendingFontPosition = capturePosition();
+      }
+      document.body.style.fontSize = size + 'px';
+      var page = document.querySelector('.page');
+      if (page) { page.style.fontSize = size + 'px'; }
+      window.__intelReaderHold = true;
+      if (pendingFontTimer) { clearTimeout(pendingFontTimer); }
+      pendingFontTimer = setTimeout(function () {
+        pendingFontTimer = null;
+        var position = pendingFontPosition ||
+          { textFraction: state.lastTextFraction };
+        pendingFontPosition = null;
+        P.afterStyleChange(position);
+      }, 170);
+    };
+
     P.setLastTextFraction = function (fraction) {
       P.noteTextFraction(fraction);
     };

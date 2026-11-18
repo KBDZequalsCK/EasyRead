@@ -31,6 +31,7 @@ swiftc \
   "$ROOT_DIR/Sources/IntelReader/DOCXRenderer.swift" \
   "$ROOT_DIR/Sources/IntelReader/ReaderPagerScript.swift" \
   "$ROOT_DIR/Sources/IntelReader/BookCoverLoader.swift" \
+  "$ROOT_DIR/Sources/IntelReader/ProLicense.swift" \
   "$ROOT_DIR/Sources/IntelReader/main.swift" \
   -o "$CONTENTS_DIR/MacOS/IntelReader"
 

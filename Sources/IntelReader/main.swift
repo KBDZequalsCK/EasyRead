@@ -59,7 +59,7 @@ enum BookSource: String, Codable, CaseIterable {
         case .iCloud:
             return "iCloud"
         case .jianguoyun:
-            return L("坚果云", "Jianguoyun")
+            return L("WebDAV", "WebDAV")
         case .local:
             return L("本地", "Local")
         }
@@ -98,6 +98,52 @@ enum BookSource: String, Codable, CaseIterable {
         case .local:
             return L("只使用这台 Mac 上的书籍文件",
                      "Uses only book files on this Mac")
+        }
+    }
+}
+
+/// The library picker shows two shelves. iCloud and a plain folder are both
+/// just "scan this folder", so they share one shelf and one folder choice;
+/// WebDAV keeps its own cached shelf because it uploads and downloads books.
+enum LibraryShelf: String, CaseIterable {
+    case folder
+    case webdav
+
+    var title: String {
+        switch self {
+        case .folder:
+            return L("书库", "Library")
+        case .webdav:
+            return L("WebDAV 书库", "WebDAV Library")
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .folder:
+            return "folder"
+        case .webdav:
+            return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .folder:
+            return L("扫描所选文件夹中的书籍；默认使用 iCloud“极简阅读”",
+                     "Reads one folder of books; the iCloud “极简阅读” folder by default")
+        case .webdav:
+            return L("书籍文件与阅读进度都通过 WebDAV 同步",
+                     "Syncs books and reading positions through WebDAV")
+        }
+    }
+
+    func contains(_ source: BookSource) -> Bool {
+        switch self {
+        case .folder:
+            return source != .jianguoyun
+        case .webdav:
+            return source == .jianguoyun
         }
     }
 }
@@ -264,6 +310,12 @@ struct ReaderChapter {
     /// ratio of the plain text, which drifts from the rendered paragraph
     /// index; jumping by this exact line keeps the TOC on the heading.
     var locatorText: String? = nil
+    /// Nested entries from the book's own navigation (an EPUB NCX/nav file
+    /// or a MOBI guide TOC). Collections use the top level for each included
+    /// book, so the contents list can fold the books that are not being read.
+    var children: [ReaderChapter] = []
+
+    var isGroup: Bool { !children.isEmpty }
 }
 
 final class LibraryStore {
@@ -378,7 +430,10 @@ final class ContainerParser: NSObject, XMLParserDelegate {
 
 final class EPUBParser: NSObject, XMLParserDelegate {
     var manifest: [String: String] = [:]
+    var properties: [String: String] = [:]
+    var mediaTypes: [String: String] = [:]
     var spine: [String] = []
+    var spineTOC: String?
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                 qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
@@ -386,11 +441,190 @@ final class EPUBParser: NSObject, XMLParserDelegate {
         case "item":
             if let id = attributeDict["id"], let href = attributeDict["href"] {
                 manifest[id] = href.removingPercentEncoding ?? href
+                properties[id] = attributeDict["properties"] ?? ""
+                mediaTypes[id] = attributeDict["media-type"] ?? ""
             }
         case "itemref":
             if let idref = attributeDict["idref"] {
                 spine.append(idref)
             }
+        case "spine":
+            spineTOC = attributeDict["toc"]
+        default:
+            break
+        }
+    }
+}
+
+/// A node in an EPUB NCX or EPUB 3 navigation document.
+private final class EPUBNavNode {
+    var title: String
+    var href: String?
+    var children: [EPUBNavNode] = []
+
+    init(title: String, href: String?) {
+        self.title = title
+        self.href = href
+    }
+}
+
+/// Reads the nested `navMap` of an EPUB 2 `toc.ncx`.
+private final class EPUBNCXParser: NSObject, XMLParserDelegate {
+    private(set) var roots: [EPUBNavNode] = []
+    private var stack: [EPUBNavNode] = []
+    private var inLabel = false
+    private var readingText = false
+    private var labelText = ""
+
+    private func localName(_ elementName: String, _ qName: String?) -> String {
+        ((qName ?? elementName).split(separator: ":").last.map(String.init) ?? elementName)
+            .lowercased()
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        switch localName(elementName, qName) {
+        case "navpoint":
+            stack.append(EPUBNavNode(title: "", href: nil))
+        case "navlabel":
+            inLabel = true
+        case "text":
+            if inLabel {
+                readingText = true
+                labelText = ""
+            }
+        case "content":
+            if let src = attributeDict["src"], !stack.isEmpty {
+                stack[stack.count - 1].href = src
+            }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if readingText {
+            labelText += string
+        }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?) {
+        switch localName(elementName, qName) {
+        case "text":
+            if readingText, !stack.isEmpty {
+                let value = labelText
+                    .components(separatedBy: .whitespacesAndNewlines)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                if !value.isEmpty {
+                    stack[stack.count - 1].title = value
+                }
+            }
+            readingText = false
+        case "navlabel":
+            inLabel = false
+        case "navpoint":
+            guard let node = stack.popLast() else { break }
+            if let parent = stack.last {
+                parent.children.append(node)
+            } else {
+                roots.append(node)
+            }
+        default:
+            break
+        }
+    }
+}
+
+/// Reads the nested `<ol>` list of an EPUB 3 navigation document.
+private final class EPUBHTMLNavParser: NSObject, XMLParserDelegate {
+    private(set) var roots: [EPUBNavNode] = []
+    private var navDepth = 0
+    private var tocNavDepth = 0
+    private var listDepth = 0
+    private var readingLink = false
+    private var linkText = ""
+    private var linkHref: String?
+    private var insertionStack: [(depth: Int, node: EPUBNavNode)] = []
+
+    private func localName(_ elementName: String, _ qName: String?) -> String {
+        ((qName ?? elementName).split(separator: ":").last.map(String.init) ?? elementName)
+            .lowercased()
+    }
+
+    private func isTableOfContents(_ attributes: [String: String]) -> Bool {
+        for (key, value) in attributes {
+            let name = key.lowercased()
+            guard name == "epub:type" || name == "type" || name == "role" else { continue }
+            let type = value.lowercased()
+            if type.contains("toc") || type.contains("doc-toc") {
+                return true
+            }
+        }
+        return false
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        switch localName(elementName, qName) {
+        case "nav":
+            navDepth += 1
+            if tocNavDepth == 0, isTableOfContents(attributeDict) {
+                tocNavDepth = navDepth
+            }
+        case "ol":
+            if tocNavDepth > 0 { listDepth += 1 }
+        case "a":
+            if tocNavDepth > 0 {
+                readingLink = true
+                linkText = ""
+                linkHref = attributeDict["href"]
+            }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if readingLink {
+            linkText += string
+        }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?) {
+        switch localName(elementName, qName) {
+        case "a":
+            if readingLink {
+                let title = linkText
+                    .components(separatedBy: .whitespacesAndNewlines)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                if !title.isEmpty {
+                    let depth = max(listDepth, 1)
+                    while let last = insertionStack.last, last.depth >= depth {
+                        insertionStack.removeLast()
+                    }
+                    let node = EPUBNavNode(title: title, href: linkHref)
+                    if let parent = insertionStack.last?.node {
+                        parent.children.append(node)
+                    } else {
+                        roots.append(node)
+                    }
+                    insertionStack.append((depth, node))
+                }
+            }
+            readingLink = false
+        case "ol":
+            if tocNavDepth > 0 {
+                listDepth = max(0, listDepth - 1)
+            }
+        case "nav":
+            if tocNavDepth == navDepth {
+                tocNavDepth = 0
+            }
+            navDepth = max(0, navDepth - 1)
         default:
             break
         }
@@ -557,12 +791,24 @@ enum BookImporter {
         return rootFilePath.removingPercentEncoding ?? rootFilePath
     }
 
-    static func epubPackage(from data: Data) -> (manifest: [String: String], spine: [String])? {
+    static func epubPackage(from data: Data) -> (
+        manifest: [String: String],
+        spine: [String],
+        properties: [String: String],
+        mediaTypes: [String: String],
+        spineTOC: String?
+    )? {
         let parser = EPUBParser()
         let xml = XMLParser(data: data)
         xml.delegate = parser
         guard xml.parse(), !parser.spine.isEmpty else { return nil }
-        return (parser.manifest, parser.spine)
+        return (
+            parser.manifest,
+            parser.spine,
+            parser.properties,
+            parser.mediaTypes,
+            parser.spineTOC
+        )
     }
 
     private static func epubAuthor(fromOPF data: Data) -> String? {
@@ -1450,7 +1696,33 @@ enum BookImporter {
               let endTag = lowercased.range(of: "</body>", range: startEnd.upperBound..<lowercased.endIndex) else {
             return source
         }
-        return String(source[startEnd.upperBound..<endTag.lowerBound])
+        let contents = String(source[startEnd.upperBound..<endTag.lowerBound])
+        // EPUB NCX/nav files often point at `file.html#body-id` instead of an
+        // element inside the body (Calibre writes body ids this way). The
+        // reader only keeps the body's inner HTML, so preserve that id as an
+        // empty anchor or those table-of-contents entries cannot jump.
+        let startTagText = String(source[startTag.lowerBound..<startEnd.upperBound])
+        if let idRange = startTagText.range(
+            of: #"(?i)\bid\s*=\s*("([^"]*)"|'([^']*)')"#,
+            options: .regularExpression
+        ) {
+            var value = String(startTagText[idRange])
+            if let equals = value.firstIndex(of: "=") {
+                value = String(value[value.index(after: equals)...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if !value.isEmpty {
+                let escaped = value
+                    .replacingOccurrences(of: "&", with: "&amp;")
+                    .replacingOccurrences(of: "\"", with: "&quot;")
+                    .replacingOccurrences(of: "<", with: "&lt;")
+                    .replacingOccurrences(of: ">", with: "&gt;")
+                return "<a id=\"\(escaped)\"></a>" + contents
+            }
+        }
+        return contents
     }
 }
 
@@ -1555,6 +1827,30 @@ final class CloudFolderSync {
         }
         return destination
     }
+
+    /// Copies an imported book into the selected library folder. This keeps
+    /// the folder self-contained so a later Scan can find the book again.
+    func copy(_ url: URL, into folder: URL) throws -> URL {
+        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+        let destination = folder.appendingPathComponent(url.lastPathComponent)
+        if destination.standardizedFileURL != url.standardizedFileURL {
+            if fileManager.fileExists(atPath: destination.path) {
+                return destination
+            }
+            try fileManager.copyItem(at: url, to: destination)
+        }
+        return destination
+    }
+
+    /// True for folders inside iCloud Drive, regardless of which subfolder was
+    /// chosen. Used to decide whether an imported book should be copied into
+    /// the library folder so the phone can see it too.
+    static func isICloudDriveFolder(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        return path.contains("/Library/Mobile Documents/")
+            || path.contains("/Library/CloudStorage/iCloud Drive/")
+            || path.contains("/Library/CloudStorage/iCloud 云盘/")
+    }
 }
 
 enum FolderBookScanner {
@@ -1604,36 +1900,48 @@ enum FolderBookScanner {
     }
 }
 
-/// The local library is a plain folder on this Mac. It behaves like the iCloud
-/// folder (scan to add books) but is never copied, uploaded, or synced anywhere.
-final class LocalFolderStore {
-    static let shared = LocalFolderStore()
+/// The folder shelf reads one plain folder on this Mac. iCloud Drive folders
+/// (including the original “极简阅读” folder) are just folders too, so the
+/// app no longer keeps a second folder library for them.
+final class FolderLibraryStore {
+    static let shared = FolderLibraryStore()
 
     private let defaults = UserDefaults.standard
-    private let folderKey = "LocalLibraryFolderPath"
+    private let folderKey = "LibraryFolderPath"
+    private let legacyLocalFolderKey = "LocalLibraryFolderPath"
+    private let legacyActiveLibraryKey = "ActiveLibrarySource"
     private let fileManager = FileManager.default
 
-    private init() {}
+    private init() {
+        guard defaults.string(forKey: folderKey)?.isEmpty != false else { return }
+        // One-time migration: keep the folder the user was actually reading
+        // from in the old three-library layout.
+        let legacyActive = defaults.string(forKey: legacyActiveLibraryKey) ?? ""
+        let legacyLocal = defaults.string(forKey: legacyLocalFolderKey) ?? ""
+        if legacyActive == BookSource.local.rawValue, !legacyLocal.isEmpty {
+            defaults.set(legacyLocal, forKey: folderKey)
+        } else {
+            defaults.set(CloudFolderSync.shared.folderURL.path, forKey: folderKey)
+        }
+    }
 
-    var folderURL: URL? {
-        guard let path = defaults.string(forKey: folderKey), !path.isEmpty else { return nil }
+    var folderURL: URL {
+        let path = defaults.string(forKey: folderKey) ?? CloudFolderSync.shared.folderURL.path
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
     var folderName: String {
-        folderURL?.lastPathComponent ?? ""
+        folderURL.lastPathComponent
     }
 
     var displayPath: String {
-        guard let folderURL else { return "" }
-        return folderURL.path.replacingOccurrences(
+        folderURL.path.replacingOccurrences(
             of: fileManager.homeDirectoryForCurrentUser.path,
             with: "~"
         )
     }
 
     var isAvailable: Bool {
-        guard let folderURL else { return false }
         var isDirectory: ObjCBool = false
         return fileManager.fileExists(atPath: folderURL.path, isDirectory: &isDirectory)
             && isDirectory.boolValue
@@ -1644,14 +1952,13 @@ final class LocalFolderStore {
     }
 
     func contains(_ url: URL) -> Bool {
-        guard let folderURL else { return false }
         let folderPath = folderURL.standardizedFileURL.path
         let itemPath = url.standardizedFileURL.path
         return itemPath == folderPath || itemPath.hasPrefix(folderPath + "/")
     }
 
     func bookURLs() -> [URL] {
-        guard let folderURL, isAvailable else { return [] }
+        guard isAvailable else { return [] }
         return FolderBookScanner.bookURLs(in: folderURL)
     }
 }
@@ -1676,36 +1983,36 @@ enum ZenReaderSyncError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidServer:
-            return L("坚果云服务器地址无效。请填写形如 https://dav.jianguoyun.com/dav/ 的地址。",
-                     "The Jianguoyun server address is invalid. Use a URL such as https://dav.jianguoyun.com/dav/.")
+            return L("WebDAV 服务器地址无效。请填写账号根目录，例如 https://dav.jianguoyun.com/dav/。",
+                     "The WebDAV server address is invalid. Enter the account root, such as https://dav.jianguoyun.com/dav/.")
         case .insecureServer:
             return L("为了保护密码，只允许使用 https:// 地址（本机测试可用 localhost）。",
                      "For password safety, only https:// addresses are allowed (localhost is allowed for testing).")
         case .missingCredentials:
-            return L("请先填写坚果云账号和应用密码。", "Enter your Jianguoyun email and app password first.")
+            return L("请先填写 WebDAV 账号和密码。", "Enter your WebDAV account and password first.")
         case .keychainReentryRequired:
-            return L("这个版本需要再输入一次坚果云应用密码（最后一次）。保存后会使用稳定的钥匙串标识，以后修改或重建 EasyRead 都不再需要重新输入。",
-                     "This build needs your Jianguoyun app password one last time. After saving, the keychain identity stays stable and later EasyRead rebuilds no longer ask for it.")
+            return L("这个版本需要再输入一次 WebDAV 密码（最后一次）。保存后会使用稳定的钥匙串标识，以后修改或重建 EasyRead 都不再需要重新输入。",
+                     "This build needs your WebDAV password one last time. After saving, the keychain identity stays stable and later EasyRead rebuilds no longer ask for it.")
         case .unauthorized:
-            return L("坚果云拒绝登录。请确认填写的是“应用密码”，而不是网页登录密码。",
-                     "Jianguoyun rejected the sign-in. Make sure you entered an app password, not your website password.")
+            return L("服务器拒绝登录。请确认账号和密码正确；部分服务商需要使用单独生成的「应用密码」而不是网页登录密码。",
+                     "The server rejected the sign-in. Check the account and password; some providers require a generated app password instead of your website password.")
         case .forbidden:
             return L("这个账号没有访问该同步目录的权限。", "This account cannot access the sync folder.")
         case .notFound:
-            return L("服务器上还没有极简阅读的同步目录。请先在 iPhone 的极简阅读中完成一次坚果云同步。",
-                     "The ZenReader sync folder was not found. Complete one Jianguoyun sync in ZenReader on your iPhone first.")
+            return L("服务器上没有找到 WebDAV 同步文件夹，或当前账号无权访问。",
+                     "The WebDAV sync folder was not found, or this account cannot access it.")
         case .conflict:
             return L("创建同步快照时发生冲突，请稍后重试。", "A conflict occurred while creating the snapshot. Try again shortly.")
         case .http(let code):
-            return L("坚果云返回了 HTTP \(code)。", "Jianguoyun returned HTTP \(code).")
+            return L("WebDAV 服务器返回了 HTTP \(code)。", "The WebDAV server returned HTTP \(code).")
         case .network(let detail):
-            return L("无法连接坚果云：\(detail)", "Could not reach Jianguoyun: \(detail)")
+            return L("无法连接 WebDAV 服务器：\(detail)", "Could not reach the WebDAV server: \(detail)")
         case .invalidSnapshot:
             return L("服务器上的进度快照格式无法识别。为避免覆盖数据，本次同步已停止。",
                      "The progress snapshot on the server has an unknown format. Sync stopped to avoid overwriting data.")
         case .snapshotMissing:
-            return L("服务器上没有找到 readerzen.json 快照。请先在 iPhone 的极简阅读中完成一次坚果云同步。",
-                     "No readerzen.json snapshot was found. Complete one Jianguoyun sync in ZenReader on your iPhone first.")
+            return L("服务器上没有找到可读的 readerzen.json 快照。",
+                     "No readable readerzen.json snapshot was found on the server.")
         case .keychain:
             return L("无法把应用密码保存到系统钥匙串。", "The app password could not be saved to the macOS Keychain.")
         }
@@ -1762,7 +2069,7 @@ enum KeychainStore {
     }
 
     private static func saveWithoutInteractionLock(_ value: String, service: String, account: String) -> Bool {
-        guard let access = makeOpenAccess(descriptor: "EasyRead · 坚果云应用密码") else {
+        guard let access = makeOpenAccess(descriptor: "EasyRead · WebDAV 密码") else {
             return false
         }
 
@@ -1975,14 +2282,157 @@ final class WebDAVHrefParser: NSObject, XMLParserDelegate {
     }
 }
 
+/// Where inside the WebDAV account the sync data lives. EasyRead keeps its own
+/// folder so it never assumes a ZenReader installation; the compatibility
+/// folder is only used when the user explicitly wants to share data with
+/// ZenReader on the phone.
+enum ZenRemoteLayout: String, CaseIterable {
+    case easyread
+    case zenreader
+
+    var folderPath: String {
+        switch self {
+        case .easyread: return "EasyRead"
+        case .zenreader: return "ZenReader/v1"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .easyread: return L("EasyRead（默认）", "EasyRead (Default)")
+        case .zenreader: return L("ZenReader（兼容）", "ZenReader (Compatible)")
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .easyread:
+            return L(
+                "在云端使用独立的 EasyRead 文件夹，不存在时首次同步会自动创建。切换只影响之后的同步，不会移动或删除另一个文件夹里的文件。",
+                "Uses a separate EasyRead folder in the cloud and creates it automatically on the first sync. Switching only affects later syncs; files in the other folder are never moved or deleted."
+            )
+        case .zenreader:
+            return L(
+                "使用 ZenReader/v1 文件夹，与 iPhone 上的极简阅读同步书籍和进度。切换只影响之后的同步，不会移动或删除 EasyRead 文件夹里的文件。",
+                "Uses the ZenReader/v1 folder to share books and positions with ZenReader on iPhone. Switching only affects later syncs; files in the EasyRead folder are never moved or deleted."
+            )
+        }
+    }
+}
+
+/// The provider choice only supplies a server template, help text and password
+/// guidance. Any standards-compliant WebDAV server can be used through the
+/// custom option; sync itself always talks plain WebDAV.
+enum ZenWebDAVProvider: String, CaseIterable {
+    case jianguoyun
+    case nextcloud
+    case infinicloud
+    case synology
+    case custom
+
+    var title: String {
+        switch self {
+        case .jianguoyun: return L("坚果云", "Jianguoyun")
+        case .nextcloud: return "Nextcloud"
+        case .infinicloud: return "InfiniCLOUD"
+        case .synology: return L("群晖 Synology", "Synology")
+        case .custom: return L("自定义 WebDAV", "Custom WebDAV")
+        }
+    }
+
+    var serverPlaceholder: String {
+        switch self {
+        case .jianguoyun: return "https://dav.jianguoyun.com/dav/"
+        case .nextcloud: return "https://cloud.example.com/remote.php/dav/files/yourname/"
+        case .infinicloud: return "https://yourname.teracloud.jp/dav/"
+        case .synology: return "https://nas.example.com:5006/"
+        case .custom: return "https://dav.example.com/"
+        }
+    }
+
+    var serverHint: String {
+        switch self {
+        case .jianguoyun:
+            return L(
+                "只填账号根目录 https://dav.jianguoyun.com/dav/；EasyRead 或 ZenReader/v1 会自动加在末尾。",
+                "Enter only the account root https://dav.jianguoyun.com/dav/; EasyRead or ZenReader/v1 is appended automatically."
+            )
+        case .nextcloud:
+            return L(
+                "填 Nextcloud 的 WebDAV 根地址，通常包含 /remote.php/dav/files/用户名/；不要手动追加 EasyRead 或 ZenReader/v1。",
+                "Enter the Nextcloud WebDAV root, usually /remote.php/dav/files/yourname/; do not append EasyRead or ZenReader/v1 yourself."
+            )
+        case .infinicloud:
+            return L(
+                "填 InfiniCLOUD 的 WebDAV 根地址 https://用户名.teracloud.jp/dav/；不要手动追加 EasyRead 或 ZenReader/v1。",
+                "Enter the InfiniCLOUD WebDAV root https://yourname.teracloud.jp/dav/; do not append EasyRead or ZenReader/v1 yourself."
+            )
+        case .synology:
+            return L(
+                "填群晖 WebDAV 的根地址（例如 https://主机:5006/）；EasyRead 或 ZenReader/v1 会自动加在末尾。",
+                "Enter the Synology WebDAV root (for example https://host:5006/); EasyRead or ZenReader/v1 is appended automatically."
+            )
+        case .custom:
+            return L(
+                "填服务商提供的 WebDAV 账号根地址；EasyRead 或 ZenReader/v1 会自动加在末尾，不要手动追加。",
+                "Enter the WebDAV account root from your provider; EasyRead or ZenReader/v1 is appended automatically."
+            )
+        }
+    }
+
+    var passwordHint: String {
+        switch self {
+        case .jianguoyun:
+            return L(
+                "请在坚果云「账户信息 → 安全选项」中生成「第三方应用密码」，不要使用登录密码。",
+                "Create an app password under Jianguoyun → Account Info → Security; do not use your login password."
+            )
+        case .nextcloud:
+            return L(
+                "请在 Nextcloud「设置 → 安全 → 应用密码」中生成应用密码，不要使用登录密码。",
+                "Create an app password under Nextcloud → Settings → Security; do not use your login password."
+            )
+        case .infinicloud:
+            return L(
+                "请使用 InfiniCLOUD 账户设置里显示的 WebDAV 连接密码。",
+                "Use the WebDAV connection password shown in your InfiniCLOUD account settings."
+            )
+        case .synology:
+            return L(
+                "请使用群晖账号密码；若开启了双重验证，请先在 DSM 中创建应用专用密码。",
+                "Use your Synology account password; if two-factor authentication is enabled, create an app-specific password in DSM first."
+            )
+        case .custom:
+            return L(
+                "请填写服务商提供的 WebDAV 密码或应用密码。",
+                "Enter the WebDAV or app password provided by your service."
+            )
+        }
+    }
+
+    static func inferred(from server: String) -> ZenWebDAVProvider {
+        let lower = server.lowercased()
+        if lower.contains("jianguoyun.com") { return .jianguoyun }
+        if lower.contains("teracloud.jp") || lower.contains("infini.cloud") { return .infinicloud }
+        if lower.contains("/remote.php/dav") || lower.contains("nextcloud") { return .nextcloud }
+        if lower.contains("synology") || lower.contains(":5005") || lower.contains(":5006") {
+            return .synology
+        }
+        if lower.contains("dav.jianguoyun") { return .jianguoyun }
+        return .custom
+    }
+}
+
 final class ZenReaderWebDAVClient {
+    private let serverRootURL: URL
     private let rootURL: URL
     private let rootPath: String
+    private let remoteFolderComponents: [String]
     private let username: String
     private let password: String
     private let session: URLSession
 
-    init(serverURL: String, username: String, password: String) throws {
+    init(serverURL: String, username: String, password: String, remoteFolder: String) throws {
         let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUser.isEmpty, !password.isEmpty else {
             throw ZenReaderSyncError.missingCredentials
@@ -2002,24 +2452,33 @@ final class ZenReaderWebDAVClient {
             throw ZenReaderSyncError.insecureServer
         }
 
+        var folder = remoteFolder.trimmingCharacters(in: .whitespacesAndNewlines)
+        while folder.hasPrefix("/") { folder.removeFirst() }
+        while folder.hasSuffix("/") { folder.removeLast() }
+        let folderComponents = folder.split(separator: "/", omittingEmptySubsequences: false)
+        guard !folderComponents.isEmpty,
+              folderComponents.allSatisfy({ component in
+                  !component.isEmpty && component != "." && component != ".."
+              }) else {
+            throw ZenReaderSyncError.invalidServer
+        }
+
+        let serverComponents = components
+        guard let serverRoot = serverComponents.url else { throw ZenReaderSyncError.invalidServer }
+
         var path = components.path
         while path.hasSuffix("/") { path.removeLast() }
-        let lowerPath = path.lowercased()
-        if !lowerPath.hasSuffix("/zenreader/v1") {
-            if lowerPath.hasSuffix("/zenreader") {
-                path += "/v1"
-            } else {
-                path += "/ZenReader/v1"
-            }
-        }
+        path += "/" + folder
         path += "/"
         components.path = path
         components.query = nil
         components.fragment = nil
         guard let root = components.url else { throw ZenReaderSyncError.invalidServer }
 
+        self.serverRootURL = serverRoot
         self.rootURL = root
         self.rootPath = path
+        self.remoteFolderComponents = folderComponents.map(String.init)
         self.username = trimmedUser
         self.password = password
 
@@ -2031,13 +2490,21 @@ final class ZenReaderWebDAVClient {
     }
 
     private func url(relativePath: String) -> URL {
-        var base = rootURL.absoluteString
-        if !base.hasSuffix("/") { base += "/" }
-        return URL(string: base + relativePath) ?? rootURL
+        url(base: rootURL, relativePath: relativePath)
+    }
+
+    private func url(base: URL, relativePath: String) -> URL {
+        var baseString = base.absoluteString
+        if !baseString.hasSuffix("/") { baseString += "/" }
+        return URL(string: baseString + relativePath) ?? base
     }
 
     private func request(relativePath: String, method: String) -> URLRequest {
-        var request = URLRequest(url: url(relativePath: relativePath))
+        request(base: rootURL, relativePath: relativePath, method: method)
+    }
+
+    private func request(base: URL, relativePath: String, method: String) -> URLRequest {
+        var request = URLRequest(url: url(base: base, relativePath: relativePath))
         request.httpMethod = method
         let token = Data("\(username):\(password)".utf8).base64EncodedString()
         request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
@@ -2119,6 +2586,7 @@ final class ZenReaderWebDAVClient {
         <D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>
         """.utf8)
         let (data, response) = try perform(request)
+        if response.statusCode == 404 { return [] }
         try validate(response, allowed: [200, 207])
 
         let hrefParser = WebDAVHrefParser()
@@ -2157,9 +2625,13 @@ final class ZenReaderWebDAVClient {
         return data
     }
 
-    func latestSnapshot() throws -> (name: String, data: Data) {
+    /// The newest readable snapshot, or nil when this remote folder has never
+    /// been synced. A folder whose snapshot names exist but none can be read
+    /// is an error: treating it as empty would overwrite real progress with a
+    /// brand-new snapshot.
+    func latestSnapshotIfExists() throws -> (name: String, data: Data)? {
         let names = try snapshotNames().sorted(by: >)
-        guard !names.isEmpty else { throw ZenReaderSyncError.snapshotMissing }
+        guard !names.isEmpty else { return nil }
         for name in names {
             do {
                 let data = try snapshotData(named: name)
@@ -2299,11 +2771,24 @@ final class ZenReaderWebDAVClient {
         if let resultError { throw resultError }
     }
 
+    /// Creates a collection and every missing parent. WebDAV MKCOL refuses to
+    /// create a child when its parent does not exist (409), so a fresh
+    /// `EasyRead` folder needs `EasyRead`, `EasyRead/objects`,
+    /// `EasyRead/objects/books`, and so on to be created in order.
     func ensureCollection(_ relativePath: String) throws {
-        var request = request(relativePath: "\(relativePath)/", method: "MKCOL")
-        let (_, response) = try perform(request)
-        if response.statusCode == 405 { return }
-        try validate(response, allowed: [200, 201, 204])
+        let components = relativePath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard !components.isEmpty else { return }
+        var current = ""
+        for component in remoteFolderComponents + components {
+            if !current.isEmpty { current += "/" }
+            current += component
+            let request = request(base: serverRootURL, relativePath: "\(current)/", method: "MKCOL")
+            let (_, response) = try perform(request)
+            if response.statusCode == 405 { continue }
+            try validate(response, allowed: [200, 201, 204])
+        }
     }
 
     func putObject(folder: String, name: String, data: Data) throws {
@@ -2383,17 +2868,20 @@ final class ZenReaderWebDAVClient {
     /// Creates a brand-new snapshot folder. Returns false when the folder already exists
     /// so the caller can pick another name instead of overwriting another device's snapshot.
     func createSnapshot(named name: String, data: Data) throws -> Bool {
+        // A brand-new remote folder has neither the chosen root nor
+        // `snapshots/`, so make both before asking for the snapshot folder.
+        try ensureCollection("snapshots")
         let folderPath = "snapshots/\(name)/"
-        var makeRequest = request(relativePath: folderPath, method: "MKCOL")
+        let makeRequest = request(relativePath: folderPath, method: "MKCOL")
         let (_, makeResponse) = try perform(makeRequest)
         if makeResponse.statusCode == 405 {
             return false
         }
         try validate(makeResponse, allowed: [200, 201, 204])
-        makeRequest = request(relativePath: "\(folderPath)readerzen.json", method: "PUT")
-        makeRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        makeRequest.httpBody = data
-        let (_, putResponse) = try perform(makeRequest)
+        var putRequest = request(relativePath: "\(folderPath)readerzen.json", method: "PUT")
+        putRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        putRequest.httpBody = data
+        let (_, putResponse) = try perform(putRequest)
         try validate(putResponse, allowed: [200, 201, 204])
         return true
     }
@@ -2876,6 +3364,28 @@ enum ZenTextLocator {
         return ZenReaderTextModel(chapters: chapters, totalLength: cursor)
     }
 
+    /// Character offset of every decoded MOBI part in the text model.
+    /// `nil` marks an image-only part that contributed no text. Used by the
+    /// table of contents to place a `filepos` anchor on the same character
+    /// scale as `textProgress`.
+    static func mobiPartStarts(at url: URL) -> (starts: [Int?], totalLength: Int)? {
+        guard let book = try? MOBIParser.parseTextOnly(url: url) else { return nil }
+        var starts: [Int?] = []
+        starts.reserveCapacity(book.parts.count)
+        var cursor = 0
+        for part in book.parts {
+            let text = plainText(fromHTML: MOBIParser.bodyContents(of: part))
+            let length = (text as NSString).length
+            if length > 0 {
+                starts.append(cursor)
+                cursor += length
+            } else {
+                starts.append(nil)
+            }
+        }
+        return (starts, cursor)
+    }
+
     private static func spineTexts(fromEPUBAt url: URL) throws -> (texts: [String], cleanupURL: URL?) {
         if BookImporter.isEPUBPackage(at: url) {
             guard let containerData = try? Data(
@@ -2933,7 +3443,7 @@ enum ZenTextLocator {
         return (texts, nil)
     }
 
-    private static func plainText(fromHTML source: String) -> String {
+    static func plainText(fromHTML source: String) -> String {
         var text = source
         // The reader renders only <body>; leaving <head> text and indentation
         // in the sync model would inflate every character position and make
@@ -2966,7 +3476,7 @@ enum ZenTextLocator {
         return decodeHTMLEntities(text)
     }
 
-    private static func decodeHTMLEntities(_ input: String) -> String {
+    static func decodeHTMLEntities(_ input: String) -> String {
         var text = input
         text = text.replacingOccurrences(of: "&nbsp;", with: " ")
         text = text.replacingOccurrences(of: "&lt;", with: "<")
@@ -3090,6 +3600,8 @@ final class ZenReaderSync {
     private let defaults = UserDefaults.standard
     private let serverKey = "ZenReaderSyncServer"
     private let usernameKey = "ZenReaderSyncUsername"
+    private let providerKey = "ZenReaderSyncProvider"
+    private let remoteLayoutKey = "ZenReaderSyncRemoteLayout"
     private let deviceKey = "ZenReaderSyncDeviceID"
     private let autoSyncKey = "ZenReaderSyncAutoEnabled"
     private let lastCompletedKey = "ZenReaderSyncLastCompletedAt"
@@ -3127,13 +3639,68 @@ final class ZenReaderSync {
     private init() {}
 
     var serverURL: String {
-        get { defaults.string(forKey: serverKey) ?? Self.defaultServer }
-        set { defaults.set(newValue, forKey: serverKey) }
+        get { Self.normalizedServerRoot(defaults.string(forKey: serverKey) ?? Self.defaultServer) }
+        set { defaults.set(Self.normalizedServerRoot(newValue), forKey: serverKey) }
     }
 
     var username: String {
         get { defaults.string(forKey: usernameKey) ?? "" }
         set { defaults.set(newValue, forKey: usernameKey) }
+    }
+
+    var provider: ZenWebDAVProvider {
+        get {
+            if let raw = defaults.string(forKey: providerKey),
+               let stored = ZenWebDAVProvider(rawValue: raw) {
+                return stored
+            }
+            // Versions before the provider picker only talked to Jianguoyun.
+            return ZenWebDAVProvider.inferred(from: serverURL)
+        }
+        set { defaults.set(newValue.rawValue, forKey: providerKey) }
+    }
+
+    /// Existing installs had their data hardcoded under `ZenReader/v1`; keep
+    /// them there so an update never points at an empty folder. New installs
+    /// start with EasyRead's own folder.
+    var remoteLayout: ZenRemoteLayout {
+        get {
+            if let raw = defaults.string(forKey: remoteLayoutKey),
+               let stored = ZenRemoteLayout(rawValue: raw) {
+                return stored
+            }
+            return hasServerAndAccount ? .zenreader : .easyread
+        }
+        set { defaults.set(newValue.rawValue, forKey: remoteLayoutKey) }
+    }
+
+    /// Strips a previously entered EasyRead / ZenReader suffix so the server
+    /// field always means the account root. The chosen folder is appended by
+    /// the WebDAV client.
+    static func normalizedServerRoot(_ raw: String) -> String {
+        var server = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !server.isEmpty else { return server }
+        while server.hasSuffix("/") { server.removeLast() }
+        guard var components = URLComponents(string: server) else {
+            return server + "/"
+        }
+        var path = components.path
+        while path.hasSuffix("/") { path.removeLast() }
+        let lowerPath = path.lowercased()
+        for suffix in ["/zenreader/v1", "/zenreader", "/easyread"] {
+            if lowerPath.hasSuffix(suffix) {
+                path = String(path.dropLast(suffix.count))
+                break
+            }
+        }
+        while path.hasSuffix("/") { path.removeLast() }
+        components.path = path
+        components.query = nil
+        components.fragment = nil
+        guard let url = components.url else { return server + "/" }
+        var result = url.absoluteString
+        while result.hasSuffix("/") { result.removeLast() }
+        return result + "/"
     }
 
     var hasServerAndAccount: Bool {
@@ -3209,12 +3776,18 @@ final class ZenReaderSync {
         return value
     }
 
-    func saveSettings(server: String, username: String, password newPassword: String?) throws {
-        let trimmedServer = server.trimmingCharacters(in: .whitespacesAndNewlines)
+    func saveSettings(
+        server: String,
+        username: String,
+        password newPassword: String?,
+        provider: ZenWebDAVProvider,
+        remoteLayout: ZenRemoteLayout
+    ) throws {
+        let trimmedServer = Self.normalizedServerRoot(server)
         let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let typedPassword = newPassword ?? ""
         guard !trimmedUser.isEmpty else { throw ZenReaderSyncError.missingCredentials }
-        let currentAccount = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentAccount = self.username.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectivePassword: String
         if !typedPassword.isEmpty {
             effectivePassword = typedPassword
@@ -3226,7 +3799,8 @@ final class ZenReaderSync {
         _ = try ZenReaderWebDAVClient(
             serverURL: trimmedServer,
             username: trimmedUser,
-            password: effectivePassword
+            password: effectivePassword,
+            remoteFolder: remoteLayout.folderPath
         )
         // Always persist under the current service. The app is unsigned, so the
         // new v4 item gets the stable "unsigned:" partition and keeps working
@@ -3236,11 +3810,18 @@ final class ZenReaderSync {
         }
         serverURL = trimmedServer
         self.username = trimmedUser
+        self.provider = provider
+        self.remoteLayout = remoteLayout
         cachePassword(effectivePassword)
     }
 
-    func testConnection(server: String, username: String, password newPassword: String) throws -> Int {
-        let trimmedServer = server.trimmingCharacters(in: .whitespacesAndNewlines)
+    func testConnection(
+        server: String,
+        username: String,
+        password newPassword: String,
+        remoteLayout: ZenRemoteLayout
+    ) throws -> Int {
+        let trimmedServer = Self.normalizedServerRoot(server)
         let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUser.isEmpty else { throw ZenReaderSyncError.missingCredentials }
         let effectivePassword: String
@@ -3255,7 +3836,8 @@ final class ZenReaderSync {
         let client = try ZenReaderWebDAVClient(
             serverURL: trimmedServer,
             username: trimmedUser,
-            password: effectivePassword
+            password: effectivePassword,
+            remoteFolder: remoteLayout.folderPath
         )
         do {
             return try client.snapshotNames().count
@@ -3268,6 +3850,8 @@ final class ZenReaderSync {
     func clearSettings() {
         defaults.removeObject(forKey: serverKey)
         defaults.removeObject(forKey: usernameKey)
+        defaults.removeObject(forKey: providerKey)
+        defaults.removeObject(forKey: remoteLayoutKey)
         for service in [keychainService] + legacyKeychainServices {
             KeychainStore.delete(service: service, account: keychainAccount)
         }
@@ -3286,17 +3870,41 @@ final class ZenReaderSync {
         let client = try ZenReaderWebDAVClient(
             serverURL: serverURL,
             username: username,
-            password: password
+            password: password,
+            remoteFolder: remoteLayout.folderPath
         )
         progress?(.checking)
-        let latest = try client.latestSnapshot()
-        guard var object = try JSONSerialization.jsonObject(with: latest.data) as? [String: Any],
-              var files = object["files"] as? [[String: Any]] else {
-            throw ZenReaderSyncError.invalidSnapshot
+        let latest = try client.latestSnapshotIfExists()
+        let isFirstSync = latest == nil
+        let latestDate: Date
+        var object: [String: Any]
+        var files: [[String: Any]]
+        if let latest {
+            guard var parsed = try JSONSerialization.jsonObject(with: latest.data) as? [String: Any],
+                  let parsedFiles = parsed["files"] as? [[String: Any]] else {
+                throw ZenReaderSyncError.invalidSnapshot
+            }
+            parsed["files"] = parsedFiles
+            object = parsed
+            files = parsedFiles
+            latestDate = Self.date(fromSnapshotName: latest.name) ?? .distantPast
+        } else {
+            // A fresh EasyRead folder has no snapshot yet. Build an empty
+            // ZenReader-compatible payload so the first download/upload can
+            // create one without requiring the phone to sync first.
+            object = [
+                "app": "readerZen",
+                "formatVersion": 1,
+                "files": [[String: Any]]()
+            ]
+            files = []
+            latestDate = .distantPast
         }
 
         var result = ZenSyncResult()
-        result.remoteSnapshot = latest.name
+        if let latest {
+            result.remoteSnapshot = latest.name
+        }
         result.totalRemoteBooks = files.count
         var pulledUpdates: [UUID: ZenProgressUpdate] = [:]
         var pushedUpdates: [UUID: ZenProgressUpdate] = [:]
@@ -3306,7 +3914,6 @@ final class ZenReaderSync {
         // listing to the upload phase instead of asking the server twice.
         var objectNames: [String]?
         let now = Date()
-        let latestDate = Self.date(fromSnapshotName: latest.name) ?? .distantPast
         let pushDate = max(now, latestDate.addingTimeInterval(0.002))
 
         if transfer.downloadsBooks {
@@ -3468,7 +4075,11 @@ final class ZenReaderSync {
             }
         }
 
-        guard dirty else {
+        // A folder that has never been synced gets its first snapshot even
+        // when there is nothing to transfer yet. This creates the selected
+        // EasyRead / ZenReader root on the server so a later device can see
+        // it without waiting for the first book.
+        guard dirty || isFirstSync else {
             return (result, pulledUpdates)
         }
 
@@ -3513,7 +4124,7 @@ final class ZenReaderSync {
                 object: object,
                 snapshotName: uploadName,
                 createdAt: uploadDate,
-                previousSnapshotName: latest.name
+                previousSnapshotName: latest?.name
             )
         } catch {
             // The snapshot itself is safely on the server; only the shared
@@ -3548,9 +4159,10 @@ final class ZenReaderSync {
         let client = try ZenReaderWebDAVClient(
             serverURL: serverURL,
             username: username,
-            password: password
+            password: password,
+            remoteFolder: remoteLayout.folderPath
         )
-        let latest = try client.latestSnapshot()
+        guard let latest = try client.latestSnapshotIfExists() else { return nil }
         guard var object = try JSONSerialization.jsonObject(with: latest.data) as? [String: Any],
               var files = object["files"] as? [[String: Any]] else {
             throw ZenReaderSyncError.invalidSnapshot
@@ -4140,12 +4752,19 @@ final class ZenReaderSync {
         let client = try ZenReaderWebDAVClient(
             serverURL: serverURL,
             username: username,
-            password: password
+            password: password,
+            remoteFolder: remoteLayout.folderPath
         )
-        let latest = try client.latestSnapshot()
-        guard let object = try JSONSerialization.jsonObject(with: latest.data) as? [String: Any],
-              let files = object["files"] as? [[String: Any]] else {
-            throw ZenReaderSyncError.invalidSnapshot
+        let latest = try client.latestSnapshotIfExists()
+        let files: [[String: Any]]
+        if let latest {
+            guard let object = try JSONSerialization.jsonObject(with: latest.data) as? [String: Any],
+                  let parsedFiles = object["files"] as? [[String: Any]] else {
+                throw ZenReaderSyncError.invalidSnapshot
+            }
+            files = parsedFiles
+        } else {
+            files = []
         }
 
         var plan = ZenSyncPlan()
@@ -4682,10 +5301,371 @@ final class ZenReaderSync {
             return (try? RTFRenderer.chapters(for: URL(fileURLWithPath: book.path))) ?? []
         case "DOCX":
             return (try? DOCXRenderer.chapters(for: URL(fileURLWithPath: book.path))) ?? []
+        case "EPUB", "MOBI", "AZW", "AZW3":
+            let model = textModel(for: book)
+            // Prefer the book's own navigation tree. Collections expose one
+            // top-level group per included book there, which is what lets the
+            // contents popover fold the volumes that are not being read.
+            let nav: [ReaderChapter]
+            if book.format == "EPUB" {
+                nav = Self.epubNavChapters(for: book, model: model)
+            } else {
+                nav = Self.mobiNavChapters(for: book, model: model)
+            }
+            if !nav.isEmpty { return nav }
+            guard let model else { return [] }
+            return Self.textChapters(from: model)
         default:
             guard let model = textModel(for: book) else { return [] }
             return Self.textChapters(from: model)
         }
+    }
+
+    /// Builds the nested table of contents from an EPUB NCX file or EPUB 3
+    /// navigation document. Href fragments become anchors in the merged
+    /// reader page; entries without a fragment fall back to the character
+    /// progress of their spine document.
+    private static func epubNavChapters(
+        for book: LibraryBook,
+        model: ZenReaderTextModel?
+    ) -> [ReaderChapter] {
+        let url = URL(fileURLWithPath: book.path)
+        let parsedPackage: (
+            manifest: [String: String],
+            spine: [String],
+            properties: [String: String],
+            mediaTypes: [String: String],
+            spineTOC: String?
+        )
+        let opfDirectory: String
+        let readData: (String) -> Data?
+        if BookImporter.isEPUBPackage(at: url) {
+            guard let containerData = try? Data(
+                    contentsOf: url.appendingPathComponent("META-INF/container.xml")
+                  ),
+                  let rootFilePath = BookImporter.epubContainerRootFilePath(from: containerData),
+                  let opfData = try? Data(contentsOf: url.appendingPathComponent(rootFilePath)),
+                  let package = BookImporter.epubPackage(from: opfData) else {
+                return []
+            }
+            parsedPackage = package
+            opfDirectory = (rootFilePath as NSString).deletingLastPathComponent
+            readData = { path in try? Data(contentsOf: url.appendingPathComponent(path)) }
+        } else {
+            guard let archive = try? ZipArchive(url: url),
+                  let containerData = try? archive.contents(of: "META-INF/container.xml"),
+                  let rootFilePath = BookImporter.epubContainerRootFilePath(from: containerData),
+                  let opfData = try? archive.contents(of: rootFilePath),
+                  let package = BookImporter.epubPackage(from: opfData) else {
+                return []
+            }
+            parsedPackage = package
+            opfDirectory = (rootFilePath as NSString).deletingLastPathComponent
+            readData = { path in try? archive.contents(of: path) }
+        }
+
+        // Prefer the EPUB 3 navigation document, then the NCX declared by the
+        // spine, then any NCX in the manifest.
+        var navHref: String?
+        var prefersHTMLNav = false
+        if let id = parsedPackage.manifest.keys.first(where: { id in
+            (parsedPackage.properties[id] ?? "")
+                .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                .contains("nav")
+        }) {
+            navHref = parsedPackage.manifest[id]
+            prefersHTMLNav = true
+        }
+        if navHref == nil, let tocID = parsedPackage.spineTOC {
+            navHref = parsedPackage.manifest[tocID]
+        }
+        if navHref == nil,
+           let ncxID = parsedPackage.mediaTypes.first(where: {
+               $0.value.lowercased() == "application/x-dtbncx+xml"
+           })?.key {
+            navHref = parsedPackage.manifest[ncxID]
+        }
+        guard let navHref, !navHref.isEmpty else { return [] }
+
+        func archivePath(for href: String, relativeTo baseDirectory: String) -> String {
+            var value = href.removingPercentEncoding ?? href
+            if let hash = value.firstIndex(of: "#") {
+                value = String(value[..<hash])
+            }
+            if let query = value.firstIndex(of: "?") {
+                value = String(value[..<query])
+            }
+            if value.hasPrefix("/") {
+                value.removeFirst()
+            } else if !baseDirectory.isEmpty {
+                value = baseDirectory + "/" + value
+            }
+            return BookImporter.normalizedEPUBPath(value)
+        }
+
+        let navPath = archivePath(for: navHref, relativeTo: opfDirectory)
+        guard let navData = readData(navPath) else { return [] }
+        let navDirectory = (navPath as NSString).deletingLastPathComponent
+        let isHTMLNav = prefersHTMLNav || ["html", "xhtml", "htm"].contains(
+            (navPath as NSString).pathExtension.lowercased()
+        )
+
+        var roots: [EPUBNavNode] = []
+        if isHTMLNav {
+            let parser = EPUBHTMLNavParser()
+            let xml = XMLParser(data: navData)
+            xml.delegate = parser
+            _ = xml.parse()
+            roots = parser.roots
+        }
+        if roots.isEmpty {
+            let parser = EPUBNCXParser()
+            let xml = XMLParser(data: navData)
+            xml.delegate = parser
+            _ = xml.parse()
+            roots = parser.roots
+        }
+        guard !roots.isEmpty else { return [] }
+
+        var spineIndexByPath: [String: Int] = [:]
+        for (index, idref) in parsedPackage.spine.enumerated() {
+            guard let href = parsedPackage.manifest[idref] else { continue }
+            let path = archivePath(for: href, relativeTo: opfDirectory)
+            if spineIndexByPath[path] == nil {
+                spineIndexByPath[path] = index
+            }
+        }
+        let totalLength = model?.totalLength ?? 0
+
+        func progress(forSpineIndex index: Int) -> Double? {
+            guard let model, totalLength > 0,
+                  index >= 0, index < model.chapters.count else { return nil }
+            return min(
+                max(Double(model.chapters[index].start) / Double(totalLength), 0),
+                1
+            )
+        }
+
+        func convert(_ nodes: [EPUBNavNode]) -> [ReaderChapter] {
+            nodes.compactMap { node in
+                let title = node.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let children = convert(node.children)
+                guard !title.isEmpty || !children.isEmpty else { return nil }
+                var anchorID: String?
+                var progressValue: Double?
+                if let href = node.href, !href.isEmpty {
+                    var target = href
+                    if let hash = href.firstIndex(of: "#") {
+                        let fragment = String(href[href.index(after: hash)...])
+                        target = String(href[..<hash])
+                        if !fragment.isEmpty {
+                            anchorID = fragment.removingPercentEncoding ?? fragment
+                        }
+                    }
+                    if !target.isEmpty {
+                        let path = archivePath(for: target, relativeTo: navDirectory)
+                        if let index = spineIndexByPath[path] {
+                            progressValue = progress(forSpineIndex: index)
+                        }
+                    }
+                }
+                let resolvedTitle = title.isEmpty
+                    ? (children.first?.title ?? L("未命名章节", "Untitled chapter"))
+                    : title
+                return ReaderChapter(
+                    title: resolvedTitle,
+                    progress: progressValue,
+                    anchorID: anchorID,
+                    pageIndex: nil,
+                    level: 0,
+                    locatorText: nil,
+                    children: children
+                )
+            }
+        }
+        return convert(roots)
+    }
+
+    /// Builds a nested table of contents from the HTML table-of-contents page
+    /// of a MOBI/AZW book. Mobipocket collections put one book per top-level
+    /// paragraph and their chapters in nested `<blockquote>` blocks, all
+    /// linked to exact `filepos` anchors.
+    private static func mobiNavChapters(
+        for book: LibraryBook,
+        model: ZenReaderTextModel?
+    ) -> [ReaderChapter] {
+        let url = URL(fileURLWithPath: book.path)
+        guard let mobi = try? MOBIParser.parseTextOnly(url: url), !mobi.parts.isEmpty,
+              let tocIndex = mobiTOCPartIndex(in: mobi.parts) else {
+            return []
+        }
+        let tocHTML = mobi.parts[tocIndex]
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?is)<(/?)(blockquote)\b[^>]*>|<a\b[^>]*?href\s*=\s*["']#(filepos\d+)["'][^>]*>(.*?)</a>"#
+        ) else { return [] }
+
+        let nsTOC = tocHTML as NSString
+        let matches = regex.matches(in: tocHTML, range: NSRange(location: 0, length: nsTOC.length))
+        var roots: [EPUBNavNode] = []
+        var stack: [EPUBNavNode?] = []
+        var depth = 0
+        var linkedAnchors = Set<String>()
+        for match in matches {
+            if match.range(at: 2).location != NSNotFound {
+                let closing = nsTOC.substring(with: match.range(at: 1)) == "/"
+                depth = closing ? max(0, depth - 1) : depth + 1
+                continue
+            }
+            guard match.range(at: 3).location != NSNotFound,
+                  match.range(at: 4).location != NSNotFound else { continue }
+            let anchor = nsTOC.substring(with: match.range(at: 3))
+            let title = mobiNavTitle(nsTOC.substring(with: match.range(at: 4)))
+            guard !title.isEmpty else { continue }
+            linkedAnchors.insert(anchor)
+            let node = EPUBNavNode(title: title, href: "#\(anchor)")
+            var parent: EPUBNavNode?
+            var parentDepth = depth - 1
+            while parentDepth >= 0 {
+                if parentDepth < stack.count, let candidate = stack[parentDepth] {
+                    parent = candidate
+                    break
+                }
+                parentDepth -= 1
+            }
+            if let parent {
+                parent.children.append(node)
+            } else {
+                roots.append(node)
+            }
+            while stack.count <= depth { stack.append(nil) }
+            stack[depth] = node
+            if stack.count > depth + 1 {
+                stack.removeSubrange((depth + 1)...)
+            }
+        }
+        guard !roots.isEmpty else { return [] }
+
+        var anchorProgress: [String: Double] = [:]
+        if !linkedAnchors.isEmpty,
+           let partStarts = ZenTextLocator.mobiPartStarts(at: url),
+           partStarts.totalLength > 0,
+           let anchorRegex = try? NSRegularExpression(
+               pattern: #"(?i)<a\b[^>]*\bid\s*=\s*["'](filepos\d+)["'][^>]*>"#
+           ) {
+            for (index, part) in mobi.parts.enumerated() {
+                guard partStarts.starts.indices.contains(index),
+                      let partStart = partStarts.starts[index] else { continue }
+                let nsPart = part as NSString
+                let anchorMatches = anchorRegex.matches(
+                    in: part,
+                    range: NSRange(location: 0, length: nsPart.length)
+                )
+                for match in anchorMatches {
+                    let name = nsPart.substring(with: match.range(at: 1))
+                    guard linkedAnchors.contains(name), anchorProgress[name] == nil else { continue }
+                    let prefix = nsPart.substring(to: match.range.location)
+                    let offset = (ZenTextLocator.plainText(fromHTML: prefix) as NSString).length
+                    let value = Double(partStart + offset) / Double(partStarts.totalLength)
+                    anchorProgress[name] = min(max(value, 0), 1)
+                }
+            }
+        }
+
+        func convert(_ nodes: [EPUBNavNode]) -> [ReaderChapter] {
+            nodes.map { node in
+                let anchor = node.href.flatMap { href -> String? in
+                    href.hasPrefix("#") ? String(href.dropFirst()) : nil
+                }
+                return ReaderChapter(
+                    title: node.title,
+                    progress: anchor.flatMap { anchorProgress[$0] },
+                    anchorID: anchor,
+                    pageIndex: nil,
+                    level: 0,
+                    locatorText: nil,
+                    children: convert(node.children)
+                )
+            }
+        }
+        return convert(roots)
+    }
+
+    /// Locates the table-of-contents document in a decoded MOBI. The guide's
+    /// `type="toc"` reference is authoritative; without one, the part with
+    /// the most `filepos` links is used so a chapter's previous/next links
+    /// are not mistaken for contents.
+    private static func mobiTOCPartIndex(in parts: [String]) -> Int? {
+        let linkRegex = try? NSRegularExpression(
+            pattern: #"(?i)href\s*=\s*["']#filepos\d+["']"#
+        )
+        func linkCount(_ text: String) -> Int {
+            guard let linkRegex else { return 0 }
+            let ns = text as NSString
+            return linkRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)).count
+        }
+        func partContaining(anchor: String) -> Int? {
+            let doubleQuoted = "id=\"\(anchor)\""
+            let singleQuoted = "id='\(anchor)'"
+            for (index, part) in parts.enumerated() {
+                if part.contains(doubleQuoted) || part.contains(singleQuoted) {
+                    return index
+                }
+            }
+            return nil
+        }
+
+        let referenceRegex = try? NSRegularExpression(
+            pattern: #"(?is)<reference\b[^>]*\btype\s*=\s*["']toc["'][^>]*>"#
+        )
+        let hrefRegex = try? NSRegularExpression(
+            pattern: #"(?i)\bhref\s*=\s*["']#(filepos\d+)["']"#
+        )
+        if let referenceRegex, let hrefRegex {
+            for part in parts {
+                let nsPart = part as NSString
+                let references = referenceRegex.matches(
+                    in: part,
+                    range: NSRange(location: 0, length: nsPart.length)
+                )
+                for reference in references {
+                    let tag = nsPart.substring(with: reference.range)
+                    let nsTag = tag as NSString
+                    guard let href = hrefRegex.firstMatch(
+                            in: tag,
+                            range: NSRange(location: 0, length: nsTag.length)
+                          ) else { continue }
+                    let anchor = nsTag.substring(with: href.range(at: 1))
+                    if let index = partContaining(anchor: anchor), linkCount(parts[index]) >= 4 {
+                        return index
+                    }
+                }
+            }
+        }
+
+        var best: (index: Int, count: Int)?
+        for (index, part) in parts.enumerated() {
+            let count = linkCount(part)
+            guard count >= 8 else { continue }
+            if best == nil || count > best!.count {
+                best = (index, count)
+            }
+        }
+        return best?.index
+    }
+
+    private static func mobiNavTitle(_ html: String) -> String {
+        var text = html.replacingOccurrences(
+            of: #"(?is)<[^>]+>"#,
+            with: "",
+            options: .regularExpression
+        )
+        text = ZenTextLocator.decodeHTMLEntities(text)
+        text = text.replacingOccurrences(
+            of: #"[\t\r\n ]+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func textChapters(from model: ZenReaderTextModel) -> [ReaderChapter] {
@@ -4918,10 +5898,14 @@ class ShelfBookButton: NSButton {
         menu.addItem(withTitle: L("在访达中显示", "Show in Finder"), action: #selector(revealInFinderRequested), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: L("从书架移除", "Remove from Library"), action: #selector(removeRequested), keyEquivalent: "")
-        if book.source == .iCloud {
-            menu.addItem(withTitle: L("从 iCloud 删除并移出书架", "Delete from iCloud & Remove"), action: #selector(removeFromCloudRequested), keyEquivalent: "")
-        } else if book.source == .jianguoyun {
-            menu.addItem(withTitle: L("从坚果云删除并移出书架", "Delete from Jianguoyun & Remove"), action: #selector(removeFromCloudRequested), keyEquivalent: "")
+        if book.source == .jianguoyun {
+            menu.addItem(withTitle: L("从 WebDAV 删除并移出书架", "Delete from WebDAV & Remove"), action: #selector(removeFromCloudRequested), keyEquivalent: "")
+        } else if FolderLibraryStore.shared.contains(URL(fileURLWithPath: book.path)) {
+            if book.source == .iCloud {
+                menu.addItem(withTitle: L("从 iCloud 删除并移出书架", "Delete from iCloud & Remove"), action: #selector(removeFromCloudRequested), keyEquivalent: "")
+            } else {
+                menu.addItem(withTitle: L("从书库文件夹删除并移出书架", "Delete from Library Folder & Remove"), action: #selector(removeFromCloudRequested), keyEquivalent: "")
+            }
         }
         menu.items.forEach { $0.target = self }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
@@ -5324,85 +6308,76 @@ final class BookCoverButton: ShelfBookButton {
     }
 }
 
-enum CloudSyncStatus {
-    case checking
+enum FolderLibraryStatus {
     case ready
-    case syncing
-    case synced(bookCount: Int)
-    case syncCompleted(added: Int, removed: Int)
-    case folderMissing
-    case folderChosen(path: String)
+    case scanning
+    case scanned(count: Int, folderName: String, path: String)
+    case folderMissing(path: String?)
+    case folderChosen(name: String, path: String)
     case booksAdded(count: Int)
-    case bookDeleted
 
     var text: String {
         switch self {
-        case .checking:
-            return L("正在检查 iCloud…", "Checking iCloud…")
         case .ready:
-            return L("iCloud：准备同步", "iCloud: Ready to sync")
-        case .syncing:
-            return L("iCloud：正在同步…", "iCloud: Syncing…")
-        case .synced(let count):
+            return L("书库：准备扫描", "Library: Ready to scan")
+        case .scanning:
+            return L("书库：正在扫描文件夹…", "Library: Scanning folder…")
+        case .scanned(let count, let folderName, _):
+            if count == 0 {
+                return L("书库：\(folderName) 里没有找到书",
+                         "Library: No books found in \(folderName)")
+            }
             return count == 1
-                ? L("iCloud：已同步 · 1 本", "iCloud: Synced · 1 book")
-                : L("iCloud：已同步 · \(count) 本", "iCloud: Synced · \(count) books")
-        case .syncCompleted(let added, let removed):
-            var parts: [String] = []
-            if added > 0 {
-                parts.append(added == 1 ? L("新增 1 本", "1 added") : L("新增 \(added) 本", "\(added) added"))
+                ? L("书库：\(folderName) · 1 本", "Library: \(folderName) · 1 book")
+                : L("书库：\(folderName) · \(count) 本", "Library: \(folderName) · \(count) books")
+        case .folderMissing(let path):
+            if let path {
+                return L("书库：文件夹不存在（\(path)），请重新选择",
+                         "Library: Folder not found (\(path)). Choose it again.")
             }
-            if removed > 0 {
-                parts.append(removed == 1 ? L("移除 1 本", "1 removed") : L("移除 \(removed) 本", "\(removed) removed"))
-            }
-            return L("iCloud：同步完成，\(parts.joined(separator: "，"))",
-                     "iCloud: Sync complete, \(parts.joined(separator: ", "))")
-        case .folderMissing:
-            return L("iCloud：未找到文件夹，请点击“位置”选择", "iCloud: Folder not found. Click “Location” to choose one.")
-        case .folderChosen(let path):
-            return L("iCloud：已选择 \(path)", "iCloud: Selected \(path)")
+            return L("书库：文件夹不存在，请重新选择",
+                     "Library: Folder not found. Choose it again.")
+        case .folderChosen(let name, _):
+            return L("书库：已选择 \(name)", "Library: Selected \(name)")
         case .booksAdded(let count):
             return count == 1
-                ? L("iCloud：已加入 1 本书", "iCloud: Added 1 book")
-                : L("iCloud：已加入 \(count) 本书", "iCloud: Added \(count) books")
-        case .bookDeleted:
-            return L("iCloud：已删除 1 本书", "iCloud: Deleted 1 book")
+                ? L("书库：已加入 1 本书", "Library: Added 1 book")
+                : L("书库：已加入 \(count) 本书", "Library: Added \(count) books")
         }
     }
 
     var shortText: String {
         switch self {
-        case .checking:
-            return L("正在检查…", "Checking…")
         case .ready:
-            return L("准备同步", "Ready to sync")
-        case .syncing:
-            return L("正在同步…", "Syncing…")
-        case .synced(let count):
+            return L("准备扫描", "Ready to scan")
+        case .scanning:
+            return L("正在扫描…", "Scanning…")
+        case .scanned(let count, let folderName, _):
+            if count == 0 {
+                return L("\(folderName)：没有书", "\(folderName): No books")
+            }
             return count == 1
-                ? L("已同步 · 1 本", "Synced · 1 book")
-                : L("已同步 · \(count) 本", "Synced · \(count) books")
-        case .syncCompleted(let added, let removed):
-            var parts: [String] = []
-            if added > 0 {
-                parts.append(L("新增 \(added) 本", "\(added) added"))
-            }
-            if removed > 0 {
-                parts.append(L("移除 \(removed) 本", "\(removed) removed"))
-            }
-            if parts.isEmpty { return L("同步完成", "Sync complete") }
-            return L("同步完成 · \(parts.joined(separator: "，"))",
-                     "Sync complete · \(parts.joined(separator: ", "))")
+                ? L("\(folderName) · 1 本", "\(folderName) · 1 book")
+                : L("\(folderName) · \(count) 本", "\(folderName) · \(count) books")
         case .folderMissing:
-            return L("未找到文件夹", "Folder not found")
-        case .folderChosen:
-            return L("已选择文件夹", "Folder selected")
+            return L("文件夹不存在", "Folder not found")
+        case .folderChosen(let name, _):
+            return L("已选择 \(name)", "Selected \(name)")
         case .booksAdded(let count):
             return count == 1
                 ? L("已加入 1 本", "1 book added")
                 : L("已加入 \(count) 本", "\(count) books added")
-        case .bookDeleted:
-            return L("已删除 1 本", "1 book deleted")
+        }
+    }
+
+    var detail: String? {
+        switch self {
+        case .scanned(_, _, let path), .folderChosen(_, let path):
+            return path
+        case .folderMissing(let path):
+            return path
+        case .ready, .scanning, .booksAdded:
+            return nil
         }
     }
 }
@@ -5563,61 +6538,10 @@ enum ZenSyncStatus {
         case .warning(_, let detail):
             return detail
         case .needsPassword:
-            return L("在同步设置里输入一次应用密码并保存即可；EasyRead 只做静默读取，不会再弹出系统钥匙串授权窗口。",
-                     "Enter the app password once in sync settings and save. EasyRead reads it silently and will not show the macOS keychain authorization dialog again.")
+            return L("在同步设置里输入一次 WebDAV 密码并保存即可；EasyRead 只做静默读取，不会再弹出系统钥匙串授权窗口。",
+                     "Enter the WebDAV password once in sync settings and save. EasyRead reads it silently and will not show the macOS keychain authorization dialog again.")
         default:
             return nil
-        }
-    }
-}
-
-enum LocalLibraryStatus {
-    case noFolder
-    case folderMissing
-    case folderChosen(name: String)
-    case scanning
-    case scanned(count: Int, folderName: String)
-    case booksAdded(count: Int)
-
-    var text: String {
-        switch self {
-        case .noFolder:
-            return L("本地书库：未选择文件夹，点文件夹图标选择",
-                     "Local library: No folder chosen. Click the folder icon to choose one.")
-        case .folderMissing:
-            return L("本地书库：文件夹不存在，请重新选择",
-                     "Local library: Folder not found. Choose it again.")
-        case .folderChosen(let name):
-            return L("本地书库：已选择 \(name)", "Local library: Selected \(name)")
-        case .scanning:
-            return L("本地书库：正在扫描文件夹…", "Local library: Scanning folder…")
-        case .scanned(let count, let name):
-            return L("本地书库：\(name) · \(count) 本", "Local library: \(name) · \(count) books")
-        case .booksAdded(let count):
-            return count == 1
-                ? L("本地书库：已加入 1 本书", "Local library: Added 1 book")
-                : L("本地书库：已加入 \(count) 本书", "Local library: Added \(count) books")
-        }
-    }
-
-    var shortText: String {
-        switch self {
-        case .noFolder:
-            return L("未选择文件夹", "No folder chosen")
-        case .folderMissing:
-            return L("文件夹不存在", "Folder not found")
-        case .folderChosen(let name):
-            return L("已选择 \(name)", "Selected \(name)")
-        case .scanning:
-            return L("正在扫描…", "Scanning…")
-        case .scanned(let count, _):
-            return count == 0
-                ? L("文件夹里没有书", "No books in this folder")
-                : L("已扫描 · \(count) 本", "Scanned · \(count) books")
-        case .booksAdded(let count):
-            return count == 1
-                ? L("已加入 1 本", "1 book added")
-                : L("已加入 \(count) 本", "\(count) books added")
         }
     }
 }
@@ -5636,9 +6560,11 @@ final class SidebarViewController: NSViewController {
     var onDeleteFromCloud: ((LibraryBook) -> Void)?
     var onZenSettings: (() -> Void)?
     var onClearLibrary: (() -> Void)?
-    var onSwitchLibrary: ((BookSource) -> Void)?
+    var onSwitchLibrary: ((LibraryShelf) -> Void)?
+    var onShowPro: (() -> Void)?
 
-    private(set) var activeLibrary: BookSource = .iCloud
+    private(set) var activeShelf: LibraryShelf = .folder
+    private var isProUnlocked = false
 
     private let scrollView = NSScrollView()
     private let listContainer = NSView()
@@ -5678,10 +6604,8 @@ final class SidebarViewController: NSViewController {
     private var becomeKeyObserver: NSObjectProtocol?
     private var isDark = false
     private var hasAppliedTheme = false
-    private var cloudStatus: CloudSyncStatus = .checking
-    private var cloudStatusColor: NSColor?
+    private var folderStatus: FolderLibraryStatus = .ready
     private var zenStatus: ZenSyncStatus = .notConfigured
-    private var localStatus: LocalLibraryStatus = .noFolder
 
     deinit {
         if let scrollObserver {
@@ -5774,8 +6698,8 @@ final class SidebarViewController: NSViewController {
         uploadButton.bezelStyle = .rounded
         uploadButton.controlSize = .small
         uploadButton.font = NSFont.systemFont(ofSize: 11)
-        uploadButton.toolTip = L("上传本机书籍与阅读进度到坚果云",
-                                 "Upload local books and reading positions to Jianguoyun")
+        uploadButton.toolTip = L("上传本机书籍与阅读进度到 WebDAV",
+                                 "Upload local books and reading positions to WebDAV")
         uploadButton.isHidden = true
 
         downloadButton.title = L("下载", "Download")
@@ -5965,7 +6889,7 @@ final class SidebarViewController: NSViewController {
         ])
 
         view = root
-        setActiveLibrary(.iCloud)
+        setActiveShelf(.folder)
         applyLanguageButtonStyle()
 
         scrollObserver = NotificationCenter.default.addObserver(
@@ -6006,10 +6930,24 @@ final class SidebarViewController: NSViewController {
 
     // MARK: - Active library
 
-    func setActiveLibrary(_ source: BookSource) {
-        activeLibrary = source
-        libraryIcon.image = NSImage(systemSymbolName: source.symbolName, accessibilityDescription: nil)
-        libraryTitleLabel.stringValue = source.libraryTitle
+    func setProUnlocked(_ unlocked: Bool) {
+        isProUnlocked = unlocked
+        if activeShelf == .webdav {
+            libraryTitleLabel.stringValue = displayTitle(for: activeShelf)
+        }
+    }
+
+    private func displayTitle(for shelf: LibraryShelf) -> String {
+        if shelf == .webdav && !isProUnlocked {
+            return L("WebDAV 书库（Pro）", "WebDAV Library (Pro)")
+        }
+        return shelf.title
+    }
+
+    func setActiveShelf(_ shelf: LibraryShelf) {
+        activeShelf = shelf
+        libraryIcon.image = NSImage(systemSymbolName: shelf.symbolName, accessibilityDescription: nil)
+        libraryTitleLabel.stringValue = displayTitle(for: shelf)
         syncButton.isHidden = false
         syncButtonWidthConstraint?.constant = 46
         accessoryButton.isHidden = false
@@ -6017,14 +6955,14 @@ final class SidebarViewController: NSViewController {
         uploadButtonWidthConstraint?.constant = 0
         downloadButton.isHidden = true
         downloadButtonWidthConstraint?.constant = 0
-        switch source {
-        case .iCloud:
+        switch shelf {
+        case .folder:
             syncButton.title = L("扫描", "Scan")
-            syncButton.toolTip = L("扫描 iCloud“极简阅读”文件夹", "Scan the iCloud “极简阅读” folder")
+            syncButton.toolTip = L("扫描当前书库文件夹", "Scan the current library folder")
             accessoryButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: L("选择文件夹", "Choose folder"))
-            accessoryButton.toolTip = L("选择 iCloud 文件夹位置", "Choose the iCloud folder location")
-            libraryClickButton.toolTip = L("切换书库；当前为 iCloud 极简阅读", "Switch library; currently iCloud ZenReader")
-        case .jianguoyun:
+            accessoryButton.toolTip = L("选择书库文件夹", "Choose the library folder")
+            libraryClickButton.toolTip = L("切换书库；当前为文件夹书库", "Switch library; currently the folder library")
+        case .webdav:
             syncButton.isHidden = true
             syncButtonWidthConstraint?.constant = 0
             uploadButton.isHidden = false
@@ -6034,63 +6972,78 @@ final class SidebarViewController: NSViewController {
             accessoryButton.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: L("同步设置", "Sync settings"))
             accessoryButton.toolTip = L("WebDAV 同步设置…", "WebDAV sync settings…")
             libraryClickButton.toolTip = L("切换书库；当前为 WebDAV 书库", "Switch library; currently WebDAV Library")
-        case .local:
-            syncButton.title = L("扫描", "Scan")
-            syncButton.toolTip = L("扫描本地文件夹", "Scan the local folder")
-            accessoryButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: L("选择文件夹", "Choose folder"))
-            accessoryButton.toolTip = L("选择本地文件夹", "Choose the local folder")
-            libraryClickButton.toolTip = L("切换书库；当前为本地书库", "Switch library; currently Local Library")
         }
-        emptyLabel.stringValue = emptyText(for: source)
+        emptyLabel.stringValue = emptyText(for: shelf)
         applyImportButtonStyle()
         updateLibraryCount()
         renderStatus()
     }
 
-    private func emptyText(for source: BookSource) -> String {
-        switch source {
-        case .iCloud:
-            return L("iCloud 书库还是空的\n把书放进“极简阅读”文件夹，再点“扫描”",
-                     "Your iCloud library is empty\nAdd books to the “极简阅读” folder, then press Scan")
-        case .jianguoyun:
+    private func emptyText(for shelf: LibraryShelf) -> String {
+        switch shelf {
+        case .folder:
+            return L("书库还是空的\n点文件夹图标选择书库文件夹，或点“导入”加入书籍",
+                     "Your library is empty\nChoose a library folder with the folder icon, or press Import")
+        case .webdav:
             return L("WebDAV 书库还是空的\n点“下载”获取云端书籍，或点“上传”推送本机书籍",
                      "Your WebDAV library is empty\nPress Download for cloud books, or Upload to push local books")
-        case .local:
-            return L("本地书库还是空的\n点文件夹图标选择文件夹，或点“导入”加入书籍",
-                     "Your local library is empty\nChoose a folder with the folder icon, or press Import")
         }
     }
 
     @objc private func libraryClicked() {
         let menu = NSMenu()
-        for source in BookSource.allCases {
+        for shelf in LibraryShelf.allCases {
+            let locked = shelf == .webdav && !isProUnlocked
             let item = NSMenuItem(
-                title: source.libraryTitle,
-                action: #selector(chooseLibrary(_:)),
+                title: displayTitle(for: shelf),
+                action: locked ? #selector(proShelfClicked) : #selector(chooseLibrary(_:)),
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = source.rawValue
-            item.state = source == activeLibrary ? .on : .off
-            item.image = NSImage(systemSymbolName: source.symbolName, accessibilityDescription: nil)
+            item.representedObject = shelf.rawValue
+            item.state = shelf == activeShelf ? .on : .off
+            item.image = NSImage(
+                systemSymbolName: locked ? "lock.fill" : shelf.symbolName,
+                accessibilityDescription: nil
+            )
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let note = NSMenuItem(
-            title: L("一次只使用一个书库", "One library at a time"),
-            action: nil,
-            keyEquivalent: ""
-        )
-        note.isEnabled = false
-        menu.addItem(note)
+        if isProUnlocked {
+            let note = NSMenuItem(
+                title: L("书库扫描一个文件夹；WebDAV 书库单独同步",
+                        "The Library shelf scans one folder; WebDAV Library syncs separately"),
+                action: nil,
+                keyEquivalent: ""
+            )
+            note.isEnabled = false
+            menu.addItem(note)
+        } else {
+            let proItem = NSMenuItem(
+                title: L("解锁 EasyRead Pro（¥8）…", "Unlock EasyRead Pro (¥8)…"),
+                action: #selector(proShelfClicked),
+                keyEquivalent: ""
+            )
+            proItem.target = self
+            proItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+            menu.addItem(proItem)
+        }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: libraryBar.bounds.minY - 6), in: libraryBar)
+    }
+
+    @objc private func proShelfClicked() {
+        onShowPro?()
     }
 
     @objc private func chooseLibrary(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
-              let source = BookSource(rawValue: raw),
-              source != activeLibrary else { return }
-        onSwitchLibrary?(source)
+              let shelf = LibraryShelf(rawValue: raw) else { return }
+        if shelf == .webdav && !isProUnlocked {
+            onShowPro?()
+            return
+        }
+        guard shelf != activeShelf else { return }
+        onSwitchLibrary?(shelf)
     }
 
     // MARK: - Book list
@@ -6166,17 +7119,16 @@ final class SidebarViewController: NSViewController {
 
     // MARK: - Status
 
-    func setCloudStatus(_ status: CloudSyncStatus, color: NSColor? = nil) {
-        cloudStatus = status
-        cloudStatusColor = color
-        if activeLibrary == .iCloud {
+    func setFolderStatus(_ status: FolderLibraryStatus) {
+        folderStatus = status
+        if activeShelf == .folder {
             renderStatus()
         }
     }
 
     func setZenStatus(_ status: ZenSyncStatus) {
         zenStatus = status
-        if activeLibrary == .jianguoyun {
+        if activeShelf == .webdav {
             renderStatus()
         }
     }
@@ -6188,13 +7140,6 @@ final class SidebarViewController: NSViewController {
         downloadButton.isEnabled = !busy
     }
 
-    func setLocalStatus(_ status: LocalLibraryStatus) {
-        localStatus = status
-        if activeLibrary == .local {
-            renderStatus()
-        }
-    }
-
     private var defaultStatusColor: NSColor {
         isDark
             ? NSColor(calibratedWhite: 0.55, alpha: 1)
@@ -6202,12 +7147,16 @@ final class SidebarViewController: NSViewController {
     }
 
     private func renderStatus() {
-        switch activeLibrary {
-        case .iCloud:
-            libraryStatusLabel.stringValue = cloudStatus.shortText
-            libraryStatusLabel.toolTip = cloudStatus.text
-            libraryStatusLabel.textColor = cloudStatusColor ?? defaultStatusColor
-        case .jianguoyun:
+        switch activeShelf {
+        case .folder:
+            libraryStatusLabel.stringValue = folderStatus.shortText
+            libraryStatusLabel.toolTip = folderStatus.detail ?? folderStatus.text
+            if case .folderMissing = folderStatus {
+                libraryStatusLabel.textColor = .systemOrange
+            } else {
+                libraryStatusLabel.textColor = defaultStatusColor
+            }
+        case .webdav:
             libraryStatusLabel.stringValue = zenStatus.shortText
             libraryStatusLabel.toolTip = zenStatus.detail ?? zenStatus.text
             if case .failed = zenStatus {
@@ -6217,29 +7166,19 @@ final class SidebarViewController: NSViewController {
             } else {
                 libraryStatusLabel.textColor = defaultStatusColor
             }
-        case .local:
-            libraryStatusLabel.stringValue = localStatus.shortText
-            libraryStatusLabel.toolTip = localStatus.text
-            if case .folderMissing = localStatus {
-                libraryStatusLabel.textColor = .systemOrange
-            } else {
-                libraryStatusLabel.textColor = defaultStatusColor
-            }
         }
-        if activeLibrary == .jianguoyun, let detail = zenStatus.detail {
+        if activeShelf == .webdav, let detail = zenStatus.detail {
             libraryClickButton.toolTip = detail
         }
         updateSyncSpinner()
     }
 
     private var isStatusBusy: Bool {
-        switch activeLibrary {
-        case .iCloud:
-            if case .syncing = cloudStatus { return true }
-        case .jianguoyun:
+        switch activeShelf {
+        case .folder:
+            if case .scanning = folderStatus { return true }
+        case .webdav:
             if case .syncing = zenStatus { return true }
-        case .local:
-            if case .scanning = localStatus { return true }
         }
         return false
     }
@@ -6328,24 +7267,25 @@ final class SidebarViewController: NSViewController {
         importButton.title = L("导入", "Import")
         applyImportButtonStyle()
         updateLayoutButton()
-        emptyLabel.stringValue = emptyText(for: activeLibrary)
+        emptyLabel.stringValue = emptyText(for: activeShelf)
         footerLabel.stringValue = "TXT · MD · EPUB · PDF · MOBI · AZW3"
-        libraryTitleLabel.stringValue = activeLibrary.libraryTitle
-        setActiveLibrary(activeLibrary)
+        setActiveShelf(activeShelf)
         applyLanguageButtonStyle()
         reload(books: books)
     }
 
     private func applyImportButtonStyle() {
-        switch activeLibrary {
-        case .iCloud:
-            importButton.toolTip = L("导入书籍并复制到 iCloud“极简阅读”文件夹",
-                                     "Import books and copy them into the iCloud “极简阅读” folder")
-        case .jianguoyun:
+        switch activeShelf {
+        case .folder:
+            if CloudFolderSync.isICloudDriveFolder(FolderLibraryStore.shared.folderURL) {
+                importButton.toolTip = L("导入书籍并复制到 iCloud 书库文件夹",
+                                         "Import books and copy them into the iCloud library folder")
+            } else {
+                importButton.toolTip = L("导入本机书籍，不上传", "Import local books; nothing is uploaded")
+            }
+        case .webdav:
             importButton.toolTip = L("加入 WebDAV 书库；下次同步时确认上传",
-                                     "Add to the Jianguoyun library; upload is confirmed on the next sync")
-        case .local:
-            importButton.toolTip = L("导入本机书籍，不上传", "Import local books; nothing is uploaded")
+                                     "Add to the WebDAV library; upload is confirmed on the next sync")
         }
     }
 
@@ -6506,10 +7446,10 @@ final class SidebarViewController: NSViewController {
     }
 
     @objc private func accessoryClicked() {
-        switch activeLibrary {
-        case .jianguoyun:
+        switch activeShelf {
+        case .webdav:
             onZenSettings?()
-        case .iCloud, .local:
+        case .folder:
             onChooseFolder?()
         }
     }
@@ -6529,6 +7469,11 @@ final class ZenSyncSettingsWindowController: NSWindowController {
     private let serverField = NSTextField()
     private let accountField = NSTextField()
     private let passwordField = NSSecureTextField()
+    private let providerPopup = NSPopUpButton()
+    private let layoutControl = NSSegmentedControl()
+    private let serverHintLabel = NSTextField(wrappingLabelWithString: "")
+    private let layoutHintLabel = NSTextField(wrappingLabelWithString: "")
+    private let passwordHintLabel = NSTextField(wrappingLabelWithString: "")
     private let autoSyncCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
     private let syncSpinner = NSProgressIndicator()
@@ -6541,6 +7486,7 @@ final class ZenSyncSettingsWindowController: NSWindowController {
     private let closeButton = NSButton()
     private var isTesting = false
     private var isManualSyncing = false
+    private var lastSelectedProvider: ZenWebDAVProvider?
     private weak var settingsRootView: NSView?
     private weak var settingsCardView: NSView?
     private weak var settingsDividerView: NSView?
@@ -6574,8 +7520,8 @@ final class ZenSyncSettingsWindowController: NSWindowController {
         let titleLabel = NSTextField(labelWithString: L("WebDAV 同步", "WebDAV Sync"))
         titleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
         let subtitleLabel = NSTextField(wrappingLabelWithString: L(
-            "与 iPhone、iPad 上的极简阅读同步书籍与阅读进度。\n上传或下载都会同时处理书籍文件和阅读进度；只新建快照，不覆盖旧快照。",
-            "Sync books and reading positions with ZenReader on iPhone and iPad.\nUpload and Download each handle book files and positions together; only new snapshots are created."
+            "通过 WebDAV 同步书籍与阅读进度。默认使用 EasyRead 自己的云端文件夹；需要和 iPhone 上的极简阅读互通时，可选择 ZenReader 兼容目录。",
+            "Sync books and reading positions over WebDAV. EasyRead uses its own cloud folder by default; choose the ZenReader compatible folder to share data with ZenReader on iPhone."
         ))
         subtitleLabel.font = NSFont.systemFont(ofSize: 11.5)
         subtitleLabel.textColor = .secondaryLabelColor
@@ -6590,12 +7536,21 @@ final class ZenSyncSettingsWindowController: NSWindowController {
         let providerLabel = makeFormLabel(L("服务商", "Provider"))
         let serverLabel = makeFormLabel(L("服务器地址", "Server"))
         let accountLabel = makeFormLabel(L("账号", "Account"))
-        let passwordLabel = makeFormLabel(L("应用密码", "App Password"))
-        let remoteLabel = makeFormLabel(L("远程目录", "Remote Folder"))
+        let passwordLabel = makeFormLabel(L("密码", "Password"))
+        let layoutLabel = makeFormLabel(L("云端目录", "Cloud Folder"))
         let labelWidth: CGFloat = 96
 
         let methodValue = makeReadOnlyValue("WebDAV")
-        let providerValue = makeReadOnlyValue(L("坚果云", "Jianguoyun"))
+
+        providerPopup.removeAllItems()
+        providerPopup.addItems(withTitles: ZenWebDAVProvider.allCases.map(\.title))
+        if let index = ZenWebDAVProvider.allCases.firstIndex(of: sync.provider) {
+            providerPopup.selectItem(at: index)
+        }
+        providerPopup.font = NSFont.systemFont(ofSize: 12)
+        providerPopup.target = self
+        providerPopup.action = #selector(providerChanged)
+        providerPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         for field in [serverField, accountField, passwordField] {
             field.font = NSFont.systemFont(ofSize: 12)
@@ -6603,46 +7558,46 @@ final class ZenSyncSettingsWindowController: NSWindowController {
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         serverField.stringValue = sync.serverURL
-        serverField.placeholderString = ZenReaderSync.defaultServer
         accountField.stringValue = sync.username
-        accountField.placeholderString = L("坚果云账号（邮箱）", "Jianguoyun account (email)")
+        accountField.placeholderString = L("WebDAV 账号或邮箱", "WebDAV account or email")
         if !sync.isConfigured && sync.hasServerAndAccount {
-            passwordField.placeholderString = L("请重新输入应用密码（只需一次）",
-                                               "Re-enter the app password (once)")
+            passwordField.placeholderString = L("请重新输入密码（只需一次）",
+                                               "Re-enter the password (once)")
         } else {
             passwordField.placeholderString = sync.password == nil
-                ? L("应用密码（坚果云请使用「第三方应用密码」）", "App password (use a Jianguoyun app password)")
+                ? L("WebDAV 密码或应用密码", "WebDAV or app password")
                 : L("已保存，留空表示不修改", "Saved; leave blank to keep it")
         }
 
-        let passwordHintText: String
-        if !sync.isConfigured && sync.hasServerAndAccount {
-            passwordHintText = L(
-                "这个版本请在下方再输入一次应用密码（最后一次）。保存后会改用稳定的钥匙串标识，以后修改或重建 EasyRead 都不再需要重新输入，也不会弹出系统授权窗口。",
-                "Enter the app password below one last time. Saving migrates it to a stable keychain identity, so later EasyRead rebuilds never ask for it again or show the macOS authorization dialog."
-            )
-        } else {
-            passwordHintText = L(
-                "请在坚果云「账户信息 → 安全选项」中生成「第三方应用密码」，不要使用登录密码。密码只保存在 macOS 钥匙串，读取时不会弹出系统授权窗口。",
-                "Create an app password under Jianguoyun → Account Info → Security; do not use your login password. It is stored in the macOS Keychain and read without a system authorization dialog."
-            )
+        layoutControl.segmentCount = ZenRemoteLayout.allCases.count
+        for (index, layout) in ZenRemoteLayout.allCases.enumerated() {
+            layoutControl.setLabel(layout.shortTitle, forSegment: index)
         }
-        let passwordHint = NSTextField(wrappingLabelWithString: passwordHintText)
-        passwordHint.font = NSFont.systemFont(ofSize: 10)
-        passwordHint.textColor = .secondaryLabelColor
+        layoutControl.trackingMode = .selectOne
+        layoutControl.selectedSegment = ZenRemoteLayout.allCases.firstIndex(of: sync.remoteLayout) ?? 0
+        layoutControl.font = NSFont.systemFont(ofSize: 11.5)
+        layoutControl.target = self
+        layoutControl.action = #selector(layoutChanged)
+
+        for hint in [serverHintLabel, layoutHintLabel, passwordHintLabel] {
+            hint.font = NSFont.systemFont(ofSize: 10)
+            hint.textColor = .secondaryLabelColor
+        }
+        let initialProvider = ZenWebDAVProvider.allCases[
+            max(0, min(providerPopup.indexOfSelectedItem, ZenWebDAVProvider.allCases.count - 1))
+        ]
+        serverField.placeholderString = initialProvider.serverPlaceholder
+        serverHintLabel.stringValue = initialProvider.serverHint
+        passwordHintLabel.stringValue = passwordHintText(for: initialProvider)
+        lastSelectedProvider = initialProvider
+        let initialLayout = ZenRemoteLayout.allCases[
+            max(0, min(layoutControl.selectedSegment, ZenRemoteLayout.allCases.count - 1))
+        ]
+        layoutHintLabel.stringValue = initialLayout.hint
 
         let divider = NSView()
         divider.wantsLayer = true
         settingsDividerView = divider
-
-        let remoteValue = NSTextField(labelWithString: "ZenReader/v1")
-        remoteValue.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        let remoteHint = NSTextField(labelWithString: L(
-            "与极简阅读一致，自动维护",
-            "Kept in sync with ZenReader automatically"
-        ))
-        remoteHint.font = NSFont.systemFont(ofSize: 10)
-        remoteHint.textColor = .secondaryLabelColor
 
         autoSyncCheckbox.title = L("自动同步", "Automatic sync")
         autoSyncCheckbox.font = NSFont.systemFont(ofSize: 12)
@@ -6706,8 +7661,8 @@ final class ZenSyncSettingsWindowController: NSWindowController {
         clearButton.contentTintColor = .systemRed
 
         let footerLabel = NSTextField(wrappingLabelWithString: L(
-            "应用密码仅保存在 macOS 钥匙串。自动同步也会上传本机书籍，只新建快照；手动上传前仍会再次确认；删除书籍请在书库中右键操作。",
-            "The app password lives only in the macOS Keychain. Automatic sync also uploads local books and only creates new snapshots; manual uploads still ask for confirmation; to delete a book, right-click it in the library."
+            "WebDAV 密码仅保存在 macOS 钥匙串。自动同步也会上传本机书籍，只新建快照；手动上传前仍会再次确认；删除书籍请在书库中右键操作。",
+            "The WebDAV password lives only in the macOS Keychain. Automatic sync also uploads local books and only creates new snapshots; manual uploads still ask for confirmation; to delete a book, right-click it in the library."
         ))
         footerLabel.font = NSFont.systemFont(ofSize: 10)
         footerLabel.textColor = .secondaryLabelColor
@@ -6734,9 +7689,10 @@ final class ZenSyncSettingsWindowController: NSWindowController {
         add(subtitleLabel, to: root)
         add(closeButton, to: root)
         add(card, to: root)
-        [methodLabel, methodValue, providerLabel, providerValue,
-         serverLabel, serverField, accountLabel, accountField, passwordLabel, passwordField,
-         passwordHint, divider, remoteLabel, remoteValue, remoteHint,
+        [methodLabel, methodValue, providerLabel, providerPopup,
+         serverLabel, serverField, serverHintLabel,
+         accountLabel, accountField, passwordLabel, passwordField,
+         passwordHintLabel, divider, layoutLabel, layoutControl, layoutHintLabel,
          autoSyncCheckbox, autoHint, lastSyncLabel].forEach { add($0, to: card) }
         add(statusLabel, to: root)
         add(syncSpinner, to: root)
@@ -6773,23 +7729,29 @@ final class ZenSyncSettingsWindowController: NSWindowController {
 
             providerLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
             providerLabel.widthAnchor.constraint(equalToConstant: labelWidth),
-            providerLabel.centerYAnchor.constraint(equalTo: providerValue.centerYAnchor),
-            providerValue.topAnchor.constraint(equalTo: methodValue.bottomAnchor, constant: 10),
-            providerValue.leadingAnchor.constraint(equalTo: providerLabel.trailingAnchor, constant: 12),
-            providerValue.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -18),
+            providerLabel.centerYAnchor.constraint(equalTo: providerPopup.centerYAnchor),
+            providerPopup.topAnchor.constraint(equalTo: methodValue.bottomAnchor, constant: 10),
+            providerPopup.leadingAnchor.constraint(equalTo: providerLabel.trailingAnchor, constant: 12),
+            providerPopup.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -18),
+            providerPopup.heightAnchor.constraint(equalToConstant: 26),
+            providerPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
 
             serverLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
             serverLabel.widthAnchor.constraint(equalToConstant: labelWidth),
             serverLabel.centerYAnchor.constraint(equalTo: serverField.centerYAnchor),
-            serverField.topAnchor.constraint(equalTo: providerValue.bottomAnchor, constant: 14),
+            serverField.topAnchor.constraint(equalTo: providerPopup.bottomAnchor, constant: 12),
             serverField.leadingAnchor.constraint(equalTo: serverLabel.trailingAnchor, constant: 12),
             serverField.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
             serverField.heightAnchor.constraint(equalToConstant: 26),
 
+            serverHintLabel.topAnchor.constraint(equalTo: serverField.bottomAnchor, constant: 4),
+            serverHintLabel.leadingAnchor.constraint(equalTo: serverField.leadingAnchor),
+            serverHintLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
+
             accountLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
             accountLabel.widthAnchor.constraint(equalToConstant: labelWidth),
             accountLabel.centerYAnchor.constraint(equalTo: accountField.centerYAnchor),
-            accountField.topAnchor.constraint(equalTo: serverField.bottomAnchor, constant: 10),
+            accountField.topAnchor.constraint(equalTo: serverHintLabel.bottomAnchor, constant: 10),
             accountField.leadingAnchor.constraint(equalTo: accountLabel.trailingAnchor, constant: 12),
             accountField.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
             accountField.heightAnchor.constraint(equalToConstant: 26),
@@ -6802,25 +7764,28 @@ final class ZenSyncSettingsWindowController: NSWindowController {
             passwordField.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
             passwordField.heightAnchor.constraint(equalToConstant: 26),
 
-            passwordHint.topAnchor.constraint(equalTo: passwordField.bottomAnchor, constant: 5),
-            passwordHint.leadingAnchor.constraint(equalTo: passwordField.leadingAnchor),
-            passwordHint.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
+            passwordHintLabel.topAnchor.constraint(equalTo: passwordField.bottomAnchor, constant: 5),
+            passwordHintLabel.leadingAnchor.constraint(equalTo: passwordField.leadingAnchor),
+            passwordHintLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
 
-            divider.topAnchor.constraint(equalTo: passwordHint.bottomAnchor, constant: 14),
+            divider.topAnchor.constraint(equalTo: passwordHintLabel.bottomAnchor, constant: 14),
             divider.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
             divider.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
             divider.heightAnchor.constraint(equalToConstant: 1),
 
-            remoteLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
-            remoteLabel.widthAnchor.constraint(equalToConstant: labelWidth),
-            remoteLabel.centerYAnchor.constraint(equalTo: remoteValue.centerYAnchor),
-            remoteValue.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 14),
-            remoteValue.leadingAnchor.constraint(equalTo: remoteLabel.trailingAnchor, constant: 12),
-            remoteHint.leadingAnchor.constraint(equalTo: remoteValue.trailingAnchor, constant: 8),
-            remoteHint.centerYAnchor.constraint(equalTo: remoteValue.centerYAnchor),
-            remoteHint.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -18),
+            layoutLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
+            layoutLabel.widthAnchor.constraint(equalToConstant: labelWidth),
+            layoutLabel.centerYAnchor.constraint(equalTo: layoutControl.centerYAnchor),
+            layoutControl.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 14),
+            layoutControl.leadingAnchor.constraint(equalTo: layoutLabel.trailingAnchor, constant: 12),
+            layoutControl.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -18),
+            layoutControl.widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
 
-            autoSyncCheckbox.topAnchor.constraint(equalTo: remoteValue.bottomAnchor, constant: 14),
+            layoutHintLabel.topAnchor.constraint(equalTo: layoutControl.bottomAnchor, constant: 4),
+            layoutHintLabel.leadingAnchor.constraint(equalTo: layoutControl.leadingAnchor),
+            layoutHintLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
+
+            autoSyncCheckbox.topAnchor.constraint(equalTo: layoutHintLabel.bottomAnchor, constant: 12),
             autoSyncCheckbox.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
             autoHint.topAnchor.constraint(equalTo: autoSyncCheckbox.bottomAnchor, constant: 3),
             autoHint.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
@@ -6935,12 +7900,76 @@ final class ZenSyncSettingsWindowController: NSWindowController {
         statusLabel.toolTip = text
     }
 
+    private var selectedProvider: ZenWebDAVProvider {
+        let providers = ZenWebDAVProvider.allCases
+        let index = providerPopup.indexOfSelectedItem
+        guard providers.indices.contains(index) else { return .jianguoyun }
+        return providers[index]
+    }
+
+    private var selectedLayout: ZenRemoteLayout {
+        let layouts = ZenRemoteLayout.allCases
+        let index = layoutControl.selectedSegment
+        guard layouts.indices.contains(index) else { return .easyread }
+        return layouts[index]
+    }
+
+    private func passwordHintText(for provider: ZenWebDAVProvider) -> String {
+        if !sync.isConfigured && sync.hasServerAndAccount {
+            return L(
+                "这个版本请再输入一次密码（最后一次）。保存后会改用稳定的钥匙串标识，以后修改或重建 EasyRead 都不再需要重新输入，也不会弹出系统授权窗口。",
+                "Enter the password one last time. Saving migrates it to a stable keychain identity, so later EasyRead rebuilds never ask for it again or show the macOS authorization dialog."
+            )
+        }
+        return provider.passwordHint
+            + L(" 密码只保存在 macOS 钥匙串，读取时不会弹出系统授权窗口。",
+                " The password is stored only in the macOS Keychain and read without a system authorization dialog.")
+    }
+
+    @objc private func providerChanged() {
+        let provider = selectedProvider
+        let previous = lastSelectedProvider
+        lastSelectedProvider = provider
+        if previous != provider {
+            // Do not leave another provider's well-known URL in the field:
+            // new installs start with the Jianguoyun root, and switching to
+            // Nextcloud or a custom server without editing it would look
+            // correct while pointing at the wrong host.
+            let current = serverField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let templateValues = Set(
+                ZenWebDAVProvider.allCases.map(\.serverPlaceholder)
+                    + [ZenReaderSync.defaultServer]
+            )
+            if current.isEmpty || templateValues.contains(current) {
+                serverField.stringValue = provider == .jianguoyun ? ZenReaderSync.defaultServer : ""
+            }
+        }
+        serverField.placeholderString = provider.serverPlaceholder
+        serverHintLabel.stringValue = provider.serverHint
+        passwordHintLabel.stringValue = passwordHintText(for: provider)
+        setStatus(
+            L("已切换到 \(provider.title)；保存配置后生效", "Switched to \(provider.title); save to apply"),
+            color: .secondaryLabelColor
+        )
+    }
+
+    @objc private func layoutChanged() {
+        layoutHintLabel.stringValue = selectedLayout.hint
+        setStatus(
+            L("云端目录：\(selectedLayout.folderPath)；保存配置后生效",
+              "Cloud folder: \(selectedLayout.folderPath); save to apply"),
+            color: .secondaryLabelColor
+        )
+    }
+
     private func persistSettings() -> Bool {
         do {
             try sync.saveSettings(
                 server: serverField.stringValue,
                 username: accountField.stringValue,
-                password: passwordField.stringValue.isEmpty ? nil : passwordField.stringValue
+                password: passwordField.stringValue.isEmpty ? nil : passwordField.stringValue,
+                provider: selectedProvider,
+                remoteLayout: selectedLayout
             )
             sync.autoSyncEnabled = autoSyncCheckbox.state == .on
             return true
@@ -7034,18 +8063,21 @@ final class ZenSyncSettingsWindowController: NSWindowController {
         let server = serverField.stringValue
         let account = accountField.stringValue
         let password = passwordField.stringValue
+        let layout = selectedLayout
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
                 let count = try ZenReaderSync.shared.testConnection(
                     server: server,
                     username: account,
-                    password: password
+                    password: password,
+                    remoteLayout: layout
                 )
                 DispatchQueue.main.async {
                     self.finishTest(
                         status: count == 0
-                            ? L("连接成功，服务器上还没有进度快照", "Connected; no progress snapshots yet")
+                            ? L("连接成功；云端还没有进度快照，首次同步会自动创建目录",
+                                "Connected; no progress snapshots yet. The folder is created on the first sync.")
                             : L("连接成功，发现 \(count) 个进度快照", "Connected; \(count) progress snapshots found"),
                         color: .systemGreen
                     )
@@ -7068,10 +8100,10 @@ final class ZenSyncSettingsWindowController: NSWindowController {
     @objc private func clearClicked() {
         guard !isManualSyncing, let window else { return }
         let alert = NSAlert()
-        alert.messageText = L("清除坚果云同步配置？", "Clear Jianguoyun sync settings?")
+        alert.messageText = L("清除 WebDAV 同步配置？", "Clear WebDAV sync settings?")
         alert.informativeText = L(
-            "会移除本机保存的服务器地址、账号和钥匙串中的应用密码。不会清空书架，也不会删除书籍文件或坚果云上的快照。",
-            "This removes the saved server, account, and app password from this Mac. It does not clear the bookshelf or delete book files or snapshots on Jianguoyun."
+            "会移除本机保存的服务器地址、账号、服务商选择和钥匙串中的密码。不会清空书架，也不会删除书籍文件或云端上的快照。",
+            "This removes the saved server, account, provider choice, and password from this Mac. It does not clear the bookshelf or delete book files or cloud snapshots."
         )
         alert.alertStyle = .warning
         alert.addButton(withTitle: L("清除配置", "Clear"))
@@ -7082,7 +8114,14 @@ final class ZenSyncSettingsWindowController: NSWindowController {
             self.serverField.stringValue = ZenReaderSync.defaultServer
             self.accountField.stringValue = ""
             self.passwordField.stringValue = ""
-            self.passwordField.placeholderString = L("应用密码（坚果云请使用「第三方应用密码」）", "App password (use a Jianguoyun app password)")
+            self.passwordField.placeholderString = L("WebDAV 密码或应用密码", "WebDAV or app password")
+            self.providerPopup.selectItem(at: 0)
+            self.lastSelectedProvider = .jianguoyun
+            self.layoutControl.selectedSegment = 0
+            self.serverField.placeholderString = ZenWebDAVProvider.jianguoyun.serverPlaceholder
+            self.serverHintLabel.stringValue = ZenWebDAVProvider.jianguoyun.serverHint
+            self.passwordHintLabel.stringValue = self.passwordHintText(for: .jianguoyun)
+            self.layoutHintLabel.stringValue = ZenRemoteLayout.easyread.hint
             self.setStatus(L("已清除本机保存的同步配置", "Saved sync settings were cleared"), color: .secondaryLabelColor)
             self.onCleared?()
         }
@@ -7099,11 +8138,36 @@ final class ZenSyncSettingsWindowController: NSWindowController {
 }
 
 private final class ReaderChaptersViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    /// One entry of the hierarchical table of contents. `key` is the path of
+    /// indices through the tree, so expansion state survives a rebuild.
+    private final class TreeItem {
+        let chapter: ReaderChapter
+        let key: String
+        var children: [TreeItem] = []
+        var progressMin: Double?
+        var progressMax: Double?
+
+        init(chapter: ReaderChapter, key: String) {
+            self.chapter = chapter
+            self.key = key
+        }
+
+        var isGroup: Bool { !children.isEmpty }
+    }
+
+    private struct Row {
+        let item: TreeItem
+        let depth: Int
+    }
+
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
     private var chapters: [ReaderChapter] = []
+    private var roots: [TreeItem] = []
+    private var rows: [Row] = []
+    private var expandedKeys: Set<String> = []
     var onSelect: ((ReaderChapter) -> Void)?
     /// Fraction of the book on screen when the popover opens. The list
     /// starts at that chapter instead of the first row, so a long novel
@@ -7171,6 +8235,9 @@ private final class ReaderChaptersViewController: NSViewController, NSTableViewD
 
     func showLoading() {
         chapters = []
+        roots = []
+        rows = []
+        expandedKeys = []
         tableView.reloadData()
         emptyLabel.isHidden = true
         spinner.isHidden = false
@@ -7181,62 +8248,207 @@ private final class ReaderChaptersViewController: NSViewController, NSTableViewD
         self.chapters = chapters
         spinner.stopAnimation(nil)
         spinner.isHidden = true
+        roots = makeItems(from: chapters, prefix: "")
+        expandedKeys = []
+        applyDefaultExpansion()
+        rebuildVisibleRows()
         tableView.reloadData()
         emptyLabel.stringValue = emptyMessage
         emptyLabel.isHidden = !chapters.isEmpty
-        if !chapters.isEmpty {
-            let row = currentChapterRow()
-            tableView.scrollRowToVisible(row)
-            // Leave some upcoming chapters visible below the current one.
-            let rowRect = tableView.rect(ofRow: row)
-            let offset = max(0, rowRect.minY - tableView.visibleRect.height * 0.35)
-            tableView.scroll(NSPoint(x: 0, y: offset))
-            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        if !rows.isEmpty {
+            scrollToActiveRow(select: true)
         }
+    }
+
+    private func makeItems(from chapters: [ReaderChapter], prefix: String) -> [TreeItem] {
+        chapters.enumerated().map { index, chapter in
+            let key = prefix.isEmpty ? "\(index)" : "\(prefix).\(index)"
+            let item = TreeItem(chapter: chapter, key: key)
+            item.children = makeItems(from: chapter.children, prefix: key)
+            var minimum = chapter.progress
+            var maximum = chapter.progress
+            for child in item.children {
+                if let childMin = child.progressMin {
+                    minimum = minimum.map { min($0, childMin) } ?? childMin
+                }
+                if let childMax = child.progressMax {
+                    maximum = maximum.map { max($0, childMax) } ?? childMax
+                }
+            }
+            item.progressMin = minimum
+            item.progressMax = maximum
+            return item
+        }
+    }
+
+    /// Collections show one top-level group per included book. Open with the
+    /// group that contains the reading position expanded (including its
+    /// nested sections) and the other books folded away.
+    private func applyDefaultExpansion() {
+        let groups = roots.filter { $0.isGroup }
+        guard !groups.isEmpty else { return }
+        var active: TreeItem?
+        if let progress = currentProgress {
+            // A group's progress range ends at its last chapter's *start*, so
+            // a position inside that chapter falls past `progressMax` and a
+            // nearest-range search would pick the next book. Pick the last
+            // group that starts at or before the reading position instead.
+            for group in groups {
+                if let low = group.progressMin, low <= progress + 0.000001 {
+                    active = group
+                }
+            }
+            if active == nil {
+                active = groups.min { lhs, rhs in
+                    abs((lhs.progressMin ?? 0) - progress) <
+                        abs((rhs.progressMin ?? 0) - progress)
+                }
+            }
+        }
+        expandSubtree(active ?? groups[0])
+    }
+
+    private func expandSubtree(_ item: TreeItem) {
+        guard item.isGroup else { return }
+        expandedKeys.insert(item.key)
+        for child in item.children {
+            expandSubtree(child)
+        }
+    }
+
+    private func rebuildVisibleRows() {
+        var result: [Row] = []
+        func append(_ items: [TreeItem], depth: Int) {
+            for item in items {
+                result.append(Row(item: item, depth: depth))
+                if item.isGroup, expandedKeys.contains(item.key) {
+                    append(item.children, depth: depth + 1)
+                }
+            }
+        }
+        append(roots, depth: 0)
+        rows = result
     }
 
     /// Row of the chapter that contains the reading position. Text and PDF
     /// chapters carry a book fraction; comic chapters are one row per page,
-    /// so their position follows from the row index.
-    private func currentChapterRow() -> Int {
-        guard let progress = currentProgress, !chapters.isEmpty else { return 0 }
-        var row = 0
-        for (index, chapter) in chapters.enumerated() {
+    /// so their position follows from the row index. Group headers are only
+    /// used when no leaf row fits.
+    private func activeRowIndex() -> Int? {
+        guard !rows.isEmpty else { return nil }
+        guard let progress = currentProgress else {
+            return rows.firstIndex(where: { !$0.item.isGroup }) ?? 0
+        }
+        var best: Int?
+        for (index, row) in rows.enumerated() {
+            let chapter = row.item.chapter
             let chapterProgress: Double?
             if let stored = chapter.progress {
                 chapterProgress = stored
+            } else if row.item.isGroup, let minimum = row.item.progressMin {
+                // A container without its own link still starts where its
+                // first child starts.
+                chapterProgress = minimum
             } else if chapter.anchorID?.hasPrefix("cbz-page-") == true, chapters.count > 1 {
                 chapterProgress = Double(index) / Double(chapters.count - 1)
             } else {
                 chapterProgress = nil
             }
-            guard let chapterProgress else { continue }
-            guard chapterProgress <= progress else { break }
-            row = index
+            guard let chapterProgress, chapterProgress <= progress + 0.000001 else { continue }
+            // The last visible row at or before the reading position is the
+            // current chapter. When its book group is folded, this is the
+            // group header; when expanded, it is the chapter inside it.
+            best = index
         }
-        return row
+        return best ?? 0
+    }
+
+    /// Both states use the same glyph rotated a quarter turn, because the
+    /// separate `chevron.down` symbol is optically smaller than
+    /// `chevron.right` at the same point size.
+    private func rotatedChevron(_ image: NSImage, angle: CGFloat) -> NSImage {
+        let side = max(image.size.width, image.size.height)
+        let rotated = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.translateBy(x: side / 2, y: side / 2)
+            context.rotate(by: angle)
+            image.draw(
+                in: NSRect(
+                    x: -image.size.width / 2,
+                    y: -image.size.height / 2,
+                    width: image.size.width,
+                    height: image.size.height
+                )
+            )
+            return true
+        }
+        rotated.isTemplate = true
+        return rotated
+    }
+
+    private func scrollToActiveRow(select: Bool) {
+        guard let row = activeRowIndex(), row >= 0, row < rows.count else { return }
+        tableView.scrollRowToVisible(row)
+        // Leave some upcoming chapters visible below the current one.
+        let rowRect = tableView.rect(ofRow: row)
+        let offset = max(0, rowRect.minY - tableView.visibleRect.height * 0.35)
+        tableView.scroll(NSPoint(x: 0, y: offset))
+        if select {
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        chapters.count
+        rows.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row >= 0, row < chapters.count else { return nil }
-        let chapter = chapters[row]
+        guard row >= 0, row < rows.count else { return nil }
+        let entry = rows[row]
+        let chapter = entry.item.chapter
+        let isGroup = entry.item.isGroup
+        let depth = max(entry.depth + chapter.level, 0)
         let cell = NSTableCellView()
+
+        let chevron = NSImageView()
+        chevron.contentTintColor = .tertiaryLabelColor
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        if isGroup {
+            let expanded = expandedKeys.contains(entry.item.key)
+            let configuration = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
+            let baseImage = NSImage(
+                systemSymbolName: "chevron.right",
+                accessibilityDescription: expanded
+                    ? L("收起目录", "Collapse contents")
+                    : L("展开目录", "Expand contents")
+            )?.withSymbolConfiguration(configuration)
+            chevron.image = expanded
+                ? baseImage.map { rotatedChevron($0, angle: -.pi / 2) }
+                : baseImage
+            chevron.imageScaling = .scaleProportionallyUpOrDown
+        }
+
         let label = NSTextField(labelWithString: chapter.title)
-        label.font = NSFont.systemFont(ofSize: chapter.level > 0 ? 12 : 13)
-        label.textColor = chapter.level > 0 ? .secondaryLabelColor : .labelColor
+        if isGroup {
+            label.font = NSFont.systemFont(ofSize: depth == 0 ? 13 : 12, weight: .medium)
+            label.textColor = .labelColor
+        } else {
+            label.font = NSFont.systemFont(ofSize: depth > 0 ? 12 : 13)
+            label.textColor = depth > 0 ? .secondaryLabelColor : .labelColor
+        }
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
+
+        cell.addSubview(chevron)
         cell.addSubview(label)
         cell.textField = label
+        let indent = 10 + CGFloat(depth) * 18
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(
-                equalTo: cell.leadingAnchor,
-                constant: 10 + CGFloat(max(chapter.level, 0)) * 14
-            ),
+            chevron.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: indent),
+            chevron.widthAnchor.constraint(equalToConstant: 14),
+            chevron.heightAnchor.constraint(equalToConstant: 14),
+            chevron.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: indent + 19),
             label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
             label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
@@ -7244,9 +8456,27 @@ private final class ReaderChaptersViewController: NSViewController, NSTableViewD
     }
 
     @objc private func handleClick() {
-        let row = tableView.clickedRow
-        guard row >= 0, row < chapters.count else { return }
-        onSelect?(chapters[row])
+        let clicked = tableView.clickedRow
+        guard clicked >= 0, clicked < rows.count else { return }
+        let entry = rows[clicked]
+        guard entry.item.isGroup else {
+            onSelect?(entry.item.chapter)
+            return
+        }
+        if expandedKeys.contains(entry.item.key) {
+            expandedKeys.remove(entry.item.key)
+        } else {
+            expandedKeys.insert(entry.item.key)
+        }
+        let origin = scrollView.contentView.bounds.origin
+        rebuildVisibleRows()
+        tableView.reloadData()
+        scrollView.contentView.scroll(to: origin)
+        if let active = activeRowIndex() {
+            tableView.selectRowIndexes(IndexSet(integer: active), byExtendingSelection: false)
+        } else {
+            tableView.deselectAll(nil)
+        }
     }
 }
 
@@ -7983,21 +9213,31 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
             webView.evaluateJavaScript("""
             (function(){
               var el=document.getElementById(\(literal));
-              if(el){
-                var pager=window.__intelReaderPager;
-                var rect=el.getBoundingClientRect();
-                // A paged layout only shows whole columns/screens, so an
-                // element jump must land on the page that holds it instead
-                // of scrolling the element merely into view.
-                if(pager && pager.isColumnPaged()){pager.goToRect(rect);}
-                else if(pager && pager.isPaged()){
-                  window.scrollTo(0,pager.snapVertical(rect.top+window.scrollY));
-                }
-                else{el.scrollIntoView({block:'start'});}
+              if(!el){return false;}
+              var pager=window.__intelReaderPager;
+              var rect=el.getBoundingClientRect();
+              // A paged layout only shows whole columns/screens, so an
+              // element jump must land on the page that holds it instead
+              // of scrolling the element merely into view.
+              if(pager && pager.isColumnPaged()){pager.goToRect(rect);}
+              else if(pager && pager.isPaged()){
+                window.scrollTo(0,pager.snapVertical(rect.top+window.scrollY));
               }
+              else{el.scrollIntoView({block:'start'});}
               if(window.__intelReaderPostPosition){window.__intelReaderPostPosition(true);}
+              return true;
             })();
-            """)
+            """) { [weak self] value, _ in
+                guard (value as? Bool) == true else {
+                    guard let self, let progress = chapter.progress else { return }
+                    self.applyExternalProgress(
+                        bookID: book.id,
+                        progress: progress,
+                        textProgress: progress
+                    )
+                    return
+                }
+            }
             return
         }
         if let needle = chapter.locatorText, !needle.isEmpty, let webView {
@@ -8467,7 +9707,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         case .iCloud:
             return "iCloud"
         case .jianguoyun:
-            return L("坚果云", "Jianguoyun")
+            return L("WebDAV", "WebDAV")
         case .local:
             return L("本地文件", "Local file")
         }
@@ -8493,7 +9733,6 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         currentBook = book
         comicSchemeHandler = nil
         updateModeButton()
-        UserDefaults.standard.set(book.id.uuidString, forKey: "LastOpenedBookID")
         tocPopover?.close()
         bookmarkPopover?.close()
         findDebounce?.cancel()
@@ -9284,12 +10523,19 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKScri
         let script = reflow
             ? """
             (function() {
-              var position = (window.__intelReaderPager && window.__intelReaderPager.capturePosition)
-                ? window.__intelReaderPager.capturePosition()
+              var pager = window.__intelReaderPager;
+              if (pager && pager.applyFontSize) {
+                // The pager resizes immediately and coalesces the expensive
+                // re-pagination, so rapid A+/A- clicks stay responsive.
+                pager.applyFontSize(\(Int(fontSize)));
+                return;
+              }
+              var position = (pager && pager.capturePosition)
+                ? pager.capturePosition()
                 : null;
               \(webReaderStyleScript)
-              if (window.__intelReaderPager && window.__intelReaderPager.afterStyleChange) {
-                window.__intelReaderPager.afterStyleChange(position);
+              if (pager && pager.afterStyleChange) {
+                pager.afterStyleChange(position);
               }
             })();
             """
@@ -9755,35 +11001,48 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     private let minimumContentSize = NSSize(width: 860, height: 560)
     private let autoSyncMinimumInterval: TimeInterval = 180
     private let zenAutoSyncMinimumInterval: TimeInterval = 300
-    private static let activeLibraryKey = "ActiveLibrarySource"
+    private static let activeShelfKey = "ActiveLibraryShelf"
+    private static let legacyActiveLibraryKey = "ActiveLibrarySource"
     private var isSyncing = false
-    private var isScanningLocalFolder = false
+    private var isScanningFolder = false
     private var lastSyncDate: Date?
     private var isZenSyncing = false
     private var lastZenSyncDate: Date?
-    private var hasRestoredLastBook = false
     private var zenSettingsController: ZenSyncSettingsWindowController?
+    private var proUnlockController: ProUnlockWindowController?
     private var activationObserver: NSObjectProtocol?
     private var resignActiveObserver: NSObjectProtocol?
     private var languageObserver: NSObjectProtocol?
     private var isDark: Bool { reader.isDarkMode }
-    private var activeLibrary: BookSource = {
-        if let raw = UserDefaults.standard.string(forKey: MainViewController.activeLibraryKey),
-           let saved = BookSource(rawValue: raw) {
+    private var activeShelf: LibraryShelf = {
+        let defaults = UserDefaults.standard
+        if let raw = defaults.string(forKey: MainViewController.activeShelfKey),
+           let saved = LibraryShelf(rawValue: raw) {
+            if saved == .webdav && !ProLicenseManager.shared.isPro {
+                return .folder
+            }
             return saved
         }
-        if CloudFolderSync.shared.isAvailable {
-            return .iCloud
+        // Migrate the old three-way choice: anything that was not WebDAV is
+        // now simply the folder shelf.
+        if let raw = defaults.string(forKey: MainViewController.legacyActiveLibraryKey),
+           let saved = BookSource(rawValue: raw) {
+            let shelf: LibraryShelf = saved == .jianguoyun ? .webdav : .folder
+            if shelf == .webdav && !ProLicenseManager.shared.isPro {
+                return .folder
+            }
+            defaults.set(shelf.rawValue, forKey: MainViewController.activeShelfKey)
+            return shelf
         }
-        if ZenReaderSync.shared.isConfigured {
-            return .jianguoyun
+        if ZenReaderSync.shared.isConfigured && ProLicenseManager.shared.isPro {
+            return .webdav
         }
-        return .local
+        return .folder
     }()
 
     private var activeBooks: [LibraryBook] {
         store.books
-            .filter { $0.source == activeLibrary }
+            .filter { activeShelf.contains($0.source) }
             .enumerated()
             .sorted { lhs, rhs in
                 if lhs.element.lastActivityAt != rhs.element.lastActivityAt {
@@ -9856,6 +11115,7 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         sidebar.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         sidebar.onSelect = { [weak self] book in self?.openBook(book) }
         sidebar.onSwitchLibrary = { [weak self] library in self?.switchLibrary(to: library) }
+        sidebar.onShowPro = { [weak self] in self?.showProUnlock() }
         reader.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         reader.onThemeChanged = { [weak self] isDark in self?.applyTheme(isDark: isDark) }
         reader.onChaptersRequested = { [weak self] book, completion in
@@ -9883,13 +11143,14 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         sidebar.onZenSettings = { [weak self] in
             self?.showZenSyncSettings(startSync: false)
         }
-        sidebar.setActiveLibrary(activeLibrary)
+        sidebar.setProUnlocked(ProLicenseManager.shared.isPro)
+        sidebar.setActiveShelf(activeShelf)
         refreshSidebar(scrollToTop: true)
-        sidebar.setCloudStatus(.ready)
+        sidebar.setFolderStatus(.ready)
         // The Jianguoyun password is only read silently from this launch's
         // cache or the Keychain; launch never shows a keychain dialog.
         refreshZenStatusForCurrentConfiguration()
-        refreshLocalFolderStatus()
+        refreshFolderStatus()
         sidebarVisible = !UserDefaults.standard.bool(forKey: "SidebarHidden")
         reader.setSidebarVisible(sidebarVisible)
         applySidebarVisibility(animated: false)
@@ -9897,9 +11158,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
 
         DispatchQueue.main.async { [weak self] in
             self?.activateCurrentLibraryOnLaunch()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.restoreLastOpenedBookIfNeeded()
         }
         activationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
@@ -9957,18 +11215,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         }
     }
 
-    private func restoreLastOpenedBookIfNeeded() {
-        guard !hasRestoredLastBook else { return }
-        hasRestoredLastBook = true
-        guard let raw = UserDefaults.standard.string(forKey: "LastOpenedBookID"),
-              let id = UUID(uuidString: raw),
-              let book = store.books.first(where: { $0.id == id && $0.source == activeLibrary }),
-              FileManager.default.fileExists(atPath: book.path) else {
-            return
-        }
-        reader.show(book: book)
-    }
-
     @objc func showFindFromMenu(_ sender: Any?) {
         reader.showFind(nil)
     }
@@ -9993,43 +11239,32 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func activateCurrentLibraryOnLaunch() {
-        switch activeLibrary {
-        case .iCloud:
-            syncFromCloud(showStatus: false)
-        case .jianguoyun:
+        switch activeShelf {
+        case .folder:
+            scanFolderLibrary(showStatus: false)
+        case .webdav:
             maybeAutoSyncZen()
-        case .local:
-            refreshLocalFolderStatus()
-            if LocalFolderStore.shared.isAvailable {
-                scanLocalFolder(showStatus: false)
-            }
         }
     }
 
-    private func switchLibrary(to library: BookSource) {
-        guard library != activeLibrary else { return }
-        hasRestoredLastBook = true
-        activeLibrary = library
-        UserDefaults.standard.set(library.rawValue, forKey: Self.activeLibraryKey)
-        sidebar.setActiveLibrary(library)
+    private func switchLibrary(to shelf: LibraryShelf) {
+        guard shelf != .webdav || ProLicenseManager.shared.isPro else {
+            showProUnlock()
+            return
+        }
+        guard shelf != activeShelf else { return }
+        activeShelf = shelf
+        UserDefaults.standard.set(shelf.rawValue, forKey: Self.activeShelfKey)
+        sidebar.setActiveShelf(shelf)
         refreshSidebar(scrollToTop: true)
 
-        switch library {
-        case .iCloud:
-            sidebar.setCloudStatus(.ready)
-            syncFromCloud(showStatus: true)
-        case .jianguoyun:
+        switch shelf {
+        case .folder:
+            sidebar.setFolderStatus(.ready)
+            scanFolderLibrary(showStatus: true)
+        case .webdav:
             refreshZenStatusForCurrentConfiguration()
             maybeAutoSyncZen()
-        case .local:
-            if LocalFolderStore.shared.folderURL == nil {
-                sidebar.setLocalStatus(.noFolder)
-            } else if LocalFolderStore.shared.isAvailable {
-                sidebar.setLocalStatus(.folderChosen(name: LocalFolderStore.shared.folderName))
-                scanLocalFolder(showStatus: true)
-            } else {
-                sidebar.setLocalStatus(.folderMissing)
-            }
         }
     }
 
@@ -10046,6 +11281,7 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         NSApp.appearance = appearance
         view.window?.appearance = appearance
         zenSettingsController?.applyAppearance(appearance)
+        proUnlockController?.applyAppearance(appearance)
         rootView.layer?.backgroundColor = (isDark
             ? NSColor(calibratedWhite: 0.105, alpha: 1)
             : NSColor.white).cgColor
@@ -10056,21 +11292,20 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func syncOnActivation() {
-        switch activeLibrary {
-        case .iCloud:
+        switch activeShelf {
+        case .folder:
             guard !isSyncing else { return }
             if let lastSyncDate, Date().timeIntervalSince(lastSyncDate) < autoSyncMinimumInterval {
                 return
             }
-            syncFromCloud(showStatus: false)
-        case .jianguoyun:
+            scanFolderLibrary(showStatus: false)
+        case .webdav:
             maybeAutoSyncZen()
-        case .local:
-            break
         }
     }
 
     private func refreshZenStatusForCurrentConfiguration() {
+        guard ProLicenseManager.shared.isPro else { return }
         // `sidebar.setActiveLibrary` already rendered the stored live stage.
         // Replacing it with “ready” here would hide a running sync.
         guard !isZenSyncing else { return }
@@ -10085,7 +11320,8 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func syncZenOnResignActive() {
-        guard activeLibrary == .jianguoyun else { return }
+        guard ProLicenseManager.shared.isPro else { return }
+        guard activeShelf == .webdav else { return }
         guard ZenReaderSync.shared.autoSyncEnabled else { return }
         guard ZenReaderSync.shared.isConfigured, !isZenSyncing else { return }
         if let lastZenSyncDate, Date().timeIntervalSince(lastZenSyncDate) < 60 {
@@ -10095,7 +11331,8 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func maybeAutoSyncZen() {
-        guard activeLibrary == .jianguoyun else { return }
+        guard ProLicenseManager.shared.isPro else { return }
+        guard activeShelf == .webdav else { return }
         guard ZenReaderSync.shared.hasServerAndAccount else {
             sidebar.setZenStatus(.notConfigured)
             return
@@ -10113,17 +11350,15 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func syncCurrentLibrary() {
-        switch activeLibrary {
-        case .iCloud:
-            syncFromCloud(showStatus: true)
-        case .jianguoyun:
-            showZenSyncSettings(startSync: false)
-        case .local:
-            if LocalFolderStore.shared.folderURL == nil {
-                chooseLocalFolder()
-            } else {
-                scanLocalFolder(showStatus: true)
+        switch activeShelf {
+        case .folder:
+            scanFolderLibrary(showStatus: true)
+        case .webdav:
+            guard ProLicenseManager.shared.isPro else {
+                showProUnlock()
+                return
             }
+            showZenSyncSettings(startSync: false)
         }
     }
 
@@ -10137,28 +11372,41 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
 
     @objc func switchLibraryFromMenu(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
-              let library = BookSource(rawValue: raw) else { return }
-        switchLibrary(to: library)
+              let shelf = LibraryShelf(rawValue: raw) else { return }
+        switchLibrary(to: shelf)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(syncCurrentLibraryFromMenu):
-            menuItem.title = activeLibrary == .local
-                ? L("扫描本地文件夹", "Scan Local Folder")
+            menuItem.title = activeShelf == .folder
+                ? L("扫描书库文件夹", "Scan Library Folder")
                 : L("同步当前书库", "Sync Current Library")
             return true
         case #selector(chooseLibraryFolderFromMenu):
-            menuItem.isHidden = activeLibrary == .jianguoyun
-            return activeLibrary != .jianguoyun
+            menuItem.isHidden = activeShelf == .webdav
+            return activeShelf != .webdav
         case #selector(clearLibraryFromMenu):
             return !activeBooks.isEmpty
         case #selector(zenSettingsFromMenu):
-            return activeLibrary == .jianguoyun
+            return activeShelf == .webdav
+        case #selector(showProUnlockFromMenu(_:)):
+            menuItem.title = ProLicenseManager.shared.isPro
+                ? L("EasyRead Pro（已解锁）…", "EasyRead Pro (Unlocked)…")
+                : L("解锁 EasyRead Pro（¥8）…", "Unlock EasyRead Pro (¥8)…")
+            return true
         case #selector(switchLibraryFromMenu(_:)):
             if let raw = menuItem.representedObject as? String,
-               let library = BookSource(rawValue: raw) {
-                menuItem.state = library == activeLibrary ? .on : .off
+               let shelf = LibraryShelf(rawValue: raw) {
+                let locked = shelf == .webdav && !ProLicenseManager.shared.isPro
+                menuItem.title = locked
+                    ? L("WebDAV 书库（Pro）", "WebDAV Library (Pro)")
+                    : shelf.title
+                menuItem.image = NSImage(
+                    systemSymbolName: locked ? "lock.fill" : shelf.symbolName,
+                    accessibilityDescription: nil
+                )
+                menuItem.state = shelf == activeShelf ? .on : .off
             }
             return true
         default:
@@ -10166,8 +11414,16 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         }
     }
 
+    @objc func showProUnlockFromMenu(_ sender: Any?) {
+        showProUnlock()
+    }
+
     @objc func zenSettingsFromMenu() {
-        guard activeLibrary == .jianguoyun else { return }
+        guard activeShelf == .webdav else { return }
+        guard ProLicenseManager.shared.isPro else {
+            showProUnlock()
+            return
+        }
         showZenSyncSettings(startSync: false)
     }
 
@@ -10177,7 +11433,15 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         transfer: ZenBookTransfer = .none,
         completion: ((String, Bool) -> Void)? = nil
     ) {
-        guard activeLibrary == .jianguoyun else {
+        guard ProLicenseManager.shared.isPro else {
+            if !automatic {
+                showProUnlock()
+            }
+            completion?(L("WebDAV 书库需要 EasyRead Pro 授权。",
+                          "The WebDAV library requires an EasyRead Pro license."), false)
+            return
+        }
+        guard activeShelf == .webdav else {
             completion?(L("请先切换到 WebDAV 书库。", "Switch to the WebDAV library first."), false)
             return
         }
@@ -10190,8 +11454,8 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
             if !automatic {
                 showZenSyncSettings(startSync: true)
             }
-            completion?(L("请先在同步设置里填写坚果云账号和应用密码。",
-                          "Enter your Jianguoyun account and app password in sync settings first."), false)
+            completion?(L("请先在同步设置里填写 WebDAV 账号和密码。",
+                          "Enter your WebDAV account and password in sync settings first."), false)
             return
         }
         guard ZenReaderSync.shared.isConfigured else {
@@ -10274,7 +11538,14 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     /// Upload action for the Jianguoyun library: adds the local books that the
     /// cloud does not have and pushes this Mac's real reading positions.
     private func performZenUpload(completion: ((String, Bool) -> Void)? = nil) {
-        guard activeLibrary == .jianguoyun else {
+        guard ProLicenseManager.shared.isPro else {
+            let message = L("WebDAV 书库需要 EasyRead Pro 授权。",
+                            "The WebDAV library requires an EasyRead Pro license.")
+            sidebar.setZenStatus(.notice(message))
+            completion?(message, false)
+            return
+        }
+        guard activeShelf == .webdav else {
             let message = L("请先切换到 WebDAV 书库。", "Switch to the WebDAV library first.")
             sidebar.setZenStatus(.notice(message))
             completion?(message, false)
@@ -10289,8 +11560,8 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         guard ZenReaderSync.shared.hasServerAndAccount else {
             sidebar.setZenStatus(.notConfigured)
             showZenSyncSettings(startSync: false)
-            completion?(L("请先在设置里填写坚果云账号和应用密码。",
-                          "Enter your Jianguoyun account and app password in settings first."), false)
+            completion?(L("请先在设置里填写 WebDAV 账号和密码。",
+                          "Enter your WebDAV account and password in settings first."), false)
             return
         }
         guard ZenReaderSync.shared.isConfigured else {
@@ -10343,7 +11614,14 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     /// Download action: pulls cloud books missing on this Mac and applies newer
     /// cloud reading positions. It never uploads or modifies cloud data.
     private func performZenDownload(completion: ((String, Bool) -> Void)? = nil) {
-        guard activeLibrary == .jianguoyun else {
+        guard ProLicenseManager.shared.isPro else {
+            let message = L("WebDAV 书库需要 EasyRead Pro 授权。",
+                            "The WebDAV library requires an EasyRead Pro license.")
+            sidebar.setZenStatus(.notice(message))
+            completion?(message, false)
+            return
+        }
+        guard activeShelf == .webdav else {
             let message = L("请先切换到 WebDAV 书库。", "Switch to the WebDAV library first.")
             sidebar.setZenStatus(.notice(message))
             completion?(message, false)
@@ -10358,8 +11636,8 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         guard ZenReaderSync.shared.hasServerAndAccount else {
             sidebar.setZenStatus(.notConfigured)
             showZenSyncSettings(startSync: false)
-            completion?(L("请先在设置里填写坚果云账号和应用密码。",
-                          "Enter your Jianguoyun account and app password in settings first."), false)
+            completion?(L("请先在设置里填写 WebDAV 账号和密码。",
+                          "Enter your WebDAV account and password in settings first."), false)
             return
         }
         guard ZenReaderSync.shared.isConfigured else {
@@ -10400,8 +11678,8 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         }
 
         let alert = NSAlert()
-        alert.messageText = L("上传本机书籍与进度到坚果云？",
-                              "Upload local books and positions to Jianguoyun?")
+        alert.messageText = L("上传本机书籍与进度到 WebDAV？",
+                              "Upload local books and positions to WebDAV?")
         alert.informativeText = summary.joined(separator: "\n") + "\n\n" + L(
             "会写入一个新快照；不会删除云端书籍或旧快照。只会上传这台 Mac 真正读过的书，其他书的云端进度保持原样。",
             "A new snapshot is written; cloud books and older snapshots are never deleted. Only books read on this Mac are pushed; other cloud positions stay unchanged."
@@ -10429,7 +11707,7 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
             added = true
         }
         guard added else { return }
-        if activeLibrary == .jianguoyun {
+        if activeShelf == .webdav {
             refreshSidebar(scrollToTop: true)
         }
     }
@@ -10642,7 +11920,42 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         refreshSidebar(scrollToTop: false)
     }
 
+    private func showProUnlock() {
+        let appearance = NSAppearance(named: reader.isDarkMode ? .darkAqua : .aqua)
+        if let existing = proUnlockController {
+            existing.applyAppearance(appearance)
+            existing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        let controller = ProUnlockWindowController(appearance: appearance)
+        controller.onUnlocked = { [weak self] in
+            self?.proLicenseDidUnlock()
+        }
+        proUnlockController = controller
+        guard let parent = view.window, let proWindow = controller.window else {
+            controller.showWindow(nil)
+            return
+        }
+        parent.beginSheet(proWindow) { [weak self] _ in
+            if self?.proUnlockController === controller {
+                self?.proUnlockController = nil
+            }
+        }
+    }
+
+    private func proLicenseDidUnlock() {
+        sidebar.setProUnlocked(true)
+        NSApp.mainMenu?.update()
+        if activeShelf == .webdav {
+            refreshZenStatusForCurrentConfiguration()
+        }
+    }
+
     private func showZenSyncSettings(startSync: Bool) {
+        guard ProLicenseManager.shared.isPro else {
+            showProUnlock()
+            return
+        }
         let appearance = NSAppearance(named: reader.isDarkMode ? .darkAqua : .aqua)
         if let existing = zenSettingsController {
             existing.applyAppearance(appearance)
@@ -10699,7 +12012,7 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
 
     private func presentZenSyncError(_ error: Error) {
         let alert = NSAlert()
-        alert.messageText = L("坚果云同步失败", "Jianguoyun sync failed")
+        alert.messageText = L("WebDAV 同步失败", "WebDAV sync failed")
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.addButton(withTitle: L("好", "OK"))
@@ -10820,26 +12133,22 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         let count = removedBooks.count
         guard count > 0 else { return }
         let detail: String
-        switch activeLibrary {
-        case .iCloud:
+        switch activeShelf {
+        case .folder:
+            let folderName = FolderLibraryStore.shared.folderName
             detail = L(
-                "会移除 iCloud 书库中的 \(count) 条书架记录。不会删除 iCloud“极简阅读”文件夹里的原书；之后点“扫描”可以重新加入。",
-                "This removes \(count) shelf records from the iCloud library. Originals in the iCloud “极简阅读” folder are kept; press Scan to add them back."
+                "会移除书库中的 \(count) 条书架记录。不会删除“\(folderName)”文件夹里的原书；之后点“扫描”可以重新加入。",
+                "This removes \(count) shelf records. Originals in “\(folderName)” are kept; press Scan to add them back."
             )
-        case .jianguoyun:
+        case .webdav:
             detail = L(
-                "会移除 WebDAV 书库中的 \(count) 条书架记录，并删除本机下载缓存。不会删除坚果云上的原书、旧快照或其他设备的数据；之后点“同步”可以重新下载。",
+                "会移除 WebDAV 书库中的 \(count) 条书架记录，并删除本机下载缓存。不会删除云端上的原书、旧快照或其他设备的数据；之后点“同步”可以重新下载。",
                 "This removes \(count) shelf records from the WebDAV library and deletes this Mac's downloaded copies. Cloud books, older snapshots, and other devices' data are kept; press Sync to download them again."
-            )
-        case .local:
-            detail = L(
-                "会移除本地书库中的 \(count) 条书架记录。不会删除任何本机书籍文件。",
-                "This removes \(count) records from the local library. No book files on this Mac are deleted."
             )
         }
         let alert = NSAlert()
-        alert.messageText = L("清理\(activeLibrary.libraryTitle)的书架？",
-                              "Clear the \(activeLibrary.libraryTitle) shelf?")
+        alert.messageText = L("清理\(activeShelf.title)的书架？",
+                              "Clear the \(activeShelf.title) shelf?")
         alert.informativeText = detail + L("\n\n只会影响当前书库，其他书库保持原样。",
                                             "\n\nOnly the current library is affected; other libraries stay as they are.")
         alert.alertStyle = .warning
@@ -10849,7 +12158,7 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
 
         reader.handleLibraryCleared()
         store.remove(removedBooks)
-        if activeLibrary == .jianguoyun {
+        if activeShelf == .webdav {
             for book in removedBooks where ZenBookCache.contains(book.path) {
                 try? FileManager.default.removeItem(atPath: book.path)
             }
@@ -10864,18 +12173,13 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         switch book.source {
         case .jianguoyun:
             detail = L(
-                "只会从这台 Mac 的 WebDAV 书库移除，坚果云上的原书仍在。以后同步时它可能重新出现；要同时从云端删除，请右键选择“从坚果云删除并移出书架”。",
-                "This only removes the book from this Mac's WebDAV library; the original on Jianguoyun remains. Syncing later may bring it back. To delete it from the cloud too, choose “Delete from Jianguoyun & Remove”."
+                "只会从这台 Mac 的 WebDAV 书库移除，云端上的原书仍在。以后同步时它可能重新出现；要同时从云端删除，请右键选择“从云端删除并移出书架”。",
+                "This only removes the book from this Mac's WebDAV library; the original in the cloud remains. Syncing later may bring it back. To delete it from the cloud too, choose “Delete from Cloud & Remove”."
             )
-        case .iCloud:
+        case .iCloud, .local:
             detail = L(
-                "只会从这台 Mac 的 iCloud 书库移除，不会删除 iCloud 文件夹里的原书；下次扫描时它可能重新出现。",
-                "This only removes the book from this Mac's iCloud library; the original in your iCloud folder remains. Scanning again may bring it back."
-            )
-        case .local:
-            detail = L(
-                "只会从本地书库移除，不会删除这本本机文件。",
-                "This only removes the book from the local library; the local file itself is not deleted."
+                "只会从这台 Mac 的书库移除，不会删除书库文件夹里的原书；下次扫描时它可能重新出现。",
+                "This only removes the book from this Mac's library; the original in the library folder remains. Scanning again may bring it back."
             )
         }
         alert.informativeText = detail
@@ -10961,20 +12265,18 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
 
     private func removeBookFromCloud(_ book: LibraryBook) {
         switch book.source {
-        case .iCloud:
-            removeICloudBookFromCloud(book)
+        case .iCloud, .local:
+            removeFolderBookFromDisk(book)
         case .jianguoyun:
             removeJianguoyunBookFromCloud(book)
-        case .local:
-            removeBook(book)
         }
     }
 
-    private func removeICloudBookFromCloud(_ book: LibraryBook) {
-        let cloud = CloudFolderSync.shared
-        guard cloud.contains(URL(fileURLWithPath: book.path)) else {
+    private func removeFolderBookFromDisk(_ book: LibraryBook) {
+        let folderStore = FolderLibraryStore.shared
+        guard folderStore.contains(URL(fileURLWithPath: book.path)) else {
             let alert = NSAlert()
-            alert.messageText = L("这本书不在当前 iCloud 文件夹中", "This book is not in the current iCloud folder")
+            alert.messageText = L("这本书不在当前书库文件夹中", "This book is not in the current library folder")
             alert.informativeText = L(
                 "它只能从 Mac 书架移除，无法通过此选项删除。",
                 "It can only be removed from the Mac library; this option cannot delete it."
@@ -10984,14 +12286,20 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
             return
         }
 
+        let isICloud = CloudFolderSync.isICloudDriveFolder(folderStore.folderURL)
         let alert = NSAlert()
-        alert.messageText = L("从 iCloud 删除这本书？", "Delete this book from iCloud?")
-        alert.informativeText = L(
-            "这会从“极简阅读”iCloud 文件夹中删除原文件，并可能同步删除 iPhone 上的对应文件。此操作无法通过本 App 撤销。",
-            "This deletes the original file from the “极简阅读” iCloud folder and may also delete the matching file on your iPhone. This cannot be undone from this app."
-        )
+        alert.messageText = L("从书库文件夹删除这本书？", "Delete this book from the library folder?")
+        alert.informativeText = isICloud
+            ? L(
+                "这会从 iCloud 书库文件夹中删除原文件，并可能同步删除其他设备上的对应文件。此操作无法通过本 App 撤销。",
+                "This deletes the original file from the iCloud library folder and may also delete the matching file on your other devices. This cannot be undone from this app."
+            )
+            : L(
+                "这会从书库文件夹中删除原文件。此操作无法通过本 App 撤销。",
+                "This deletes the original file from the library folder. This cannot be undone from this app."
+            )
         alert.alertStyle = .warning
-        alert.addButton(withTitle: L("从 iCloud 删除", "Delete from iCloud"))
+        alert.addButton(withTitle: L("删除", "Delete"))
         alert.addButton(withTitle: L("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -10999,10 +12307,14 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
             try FileManager.default.removeItem(atPath: book.path)
             store.remove(book)
             refreshSidebar(scrollToTop: true)
-            sidebar.setCloudStatus(.bookDeleted)
+            sidebar.setFolderStatus(.scanned(
+                count: activeBooks.count,
+                folderName: folderStore.folderName,
+                path: folderStore.displayPath
+            ))
         } catch {
             let errorAlert = NSAlert(error: error)
-            errorAlert.messageText = L("无法从 iCloud 删除这本书", "Could not delete this book from iCloud")
+            errorAlert.messageText = L("无法删除这本书", "Could not delete this book")
             errorAlert.runModal()
         }
     }
@@ -11025,21 +12337,21 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         }
 
         let alert = NSAlert()
-        alert.messageText = L("从坚果云删除这本书？", "Delete this book from Jianguoyun?")
+        alert.messageText = L("从 WebDAV 删除这本书？", "Delete this book from WebDAV?")
         let cacheNote = ZenBookCache.contains(book.path)
             ? L("这台 Mac 上下载的缓存副本也会一并删除。",
                 "The downloaded cache copy on this Mac is removed as well.")
             : L("这本书的本机文件会保留。", "The local book file on this Mac is kept.")
         alert.informativeText = L(
-            "会在坚果云写入一次新的删除快照，iPhone 和 iPad 下次同步后书架里也不再显示这本书。\n\n"
+            "会向 WebDAV 写入一次新的删除快照；使用同一同步目录的其他设备下次同步后，书架里也不再显示这本书。\n\n"
                 + cacheNote
                 + "\n旧快照不会被修改或删除，所以数据仍可从历史快照找回。",
-            "A new deletion snapshot is written to Jianguoyun; after the next sync the book also disappears from your iPhone and iPad shelves.\n\n"
+            "A new deletion snapshot is written to WebDAV; after the next sync the book also disappears from shelves on other devices using the same sync folder.\n\n"
                 + cacheNote
                 + "\nOlder snapshots are never modified or deleted, so the data can still be recovered from history."
         )
         alert.alertStyle = .warning
-        alert.addButton(withTitle: L("从坚果云删除", "Delete from Jianguoyun"))
+        alert.addButton(withTitle: L("从 WebDAV 删除", "Delete from WebDAV"))
         alert.addButton(withTitle: L("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -11121,29 +12433,31 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
             seenPaths.insert(url.standardizedFileURL.path).inserted
         }
         guard !validURLs.isEmpty else { return }
-        let targetLibrary = activeLibrary
+        let targetShelf = activeShelf
+        let targetFolder = FolderLibraryStore.shared.folderURL
+        let folderIsICloud = CloudFolderSync.isICloudDriveFolder(targetFolder)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var importedBooks: [LibraryBook] = []
             for url in validURLs {
                 var finalURL = url
-                var source = targetLibrary
-                switch targetLibrary {
-                case .iCloud:
+                var source: BookSource
+                switch targetShelf {
+                case .folder:
                     CloudFolderSync.shared.prepareForReading(url)
-                    if CloudFolderSync.shared.isAvailable,
-                       !CloudFolderSync.shared.contains(url) {
-                        guard let copied = try? CloudFolderSync.shared.copyIntoFolder(url) else {
+                    if folderIsICloud,
+                       !FolderLibraryStore.shared.contains(url) {
+                        guard let copied = try? CloudFolderSync.shared.copy(url, into: targetFolder) else {
                             continue
                         }
                         finalURL = copied
                     }
-                    source = CloudFolderSync.shared.contains(finalURL) ? .iCloud : .local
-                case .jianguoyun:
+                    source = CloudFolderSync.isICloudDriveFolder(finalURL.deletingLastPathComponent())
+                        ? .iCloud
+                        : .local
+                case .webdav:
                     CloudFolderSync.shared.prepareForReading(url)
                     source = .jianguoyun
-                case .local:
-                    source = .local
                 }
                 importedBooks.append(BookImporter.book(from: finalURL, source: source))
             }
@@ -11152,10 +12466,10 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
                 guard let self else { return }
                 importedBooks.forEach { self.store.add($0) }
                 self.refreshSidebar(scrollToTop: true)
-                switch targetLibrary {
-                case .iCloud:
-                    self.sidebar.setCloudStatus(.booksAdded(count: importedBooks.count))
-                case .jianguoyun:
+                switch targetShelf {
+                case .folder:
+                    self.sidebar.setFolderStatus(.booksAdded(count: importedBooks.count))
+                case .webdav:
                     if !importedBooks.isEmpty {
                         let localOnlyCount = importedBooks.filter {
                             !BookImporter.isPhoneSyncable(format: $0.format)
@@ -11177,191 +12491,52 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
                             )))
                         }
                     }
-                case .local:
-                    break
                 }
-                if self.activeLibrary == targetLibrary, let first = importedBooks.first {
-                    self.hasRestoredLastBook = true
+                if self.activeShelf == targetShelf, let first = importedBooks.first {
                     self.reader.show(book: first)
                 }
             }
         }
     }
 
-    private func syncFromCloud(showStatus: Bool) {
-        guard activeLibrary == .iCloud else { return }
-        guard !isSyncing else { return }
-        isSyncing = true
+    private func scanFolderLibrary(showStatus: Bool) {
+        guard activeShelf == .folder else { return }
+        guard !isScanningFolder else { return }
+        let folderStore = FolderLibraryStore.shared
+        guard folderStore.isAvailable else {
+            sidebar.setFolderStatus(.folderMissing(path: folderStore.displayPath))
+            if showStatus {
+                chooseLibraryFolder()
+            }
+            return
+        }
+
+        isScanningFolder = true
         lastSyncDate = Date()
         if showStatus {
-            sidebar.setCloudStatus(.syncing)
+            sidebar.setFolderStatus(.scanning)
         }
 
+        let folder = folderStore.folderURL
+        let folderSource: BookSource = CloudFolderSync.isICloudDriveFolder(folder) ? .iCloud : .local
         let existingPaths = Set(store.books.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
         let authorCandidatePaths = Set(
             store.books
-                .filter { $0.source == .iCloud && $0.author.isEmpty }
-                .map { URL(fileURLWithPath: $0.path).standardizedFileURL.path }
-        )
-
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let sync = CloudFolderSync.shared
-            let urls = sync.bookURLs()
-            urls.forEach { sync.prepareForReading($0) }
-
-            let urlsByPath = Dictionary(
-                urls.map { ($0.standardizedFileURL.path, $0) },
-                uniquingKeysWith: { first, _ in first }
-            )
-            let newBooks = urls
-                .filter { !existingPaths.contains($0.standardizedFileURL.path) }
-                .map { BookImporter.book(from: $0, source: .iCloud) }
-            let inferredAuthors: [(path: String, author: String)] = authorCandidatePaths.compactMap { path in
-                guard let url = urlsByPath[path] else { return nil }
-                let author = BookImporter.inferredAuthor(from: url)
-                return author.isEmpty ? nil : (path, author)
-            }
-
-            DispatchQueue.main.async {
-                let syncAvailable = sync.isAvailable
-                let cloudPaths = Set(urlsByPath.keys)
-                let staleBooks: [LibraryBook]
-                if syncAvailable {
-                    staleBooks = self.store.books.filter { book in
-                        book.source == .iCloud &&
-                        sync.contains(URL(fileURLWithPath: book.path)) &&
-                        !cloudPaths.contains(URL(fileURLWithPath: book.path).standardizedFileURL.path)
-                    }
-                } else {
-                    // Never remove shelf records while the iCloud folder is unavailable.
-                    staleBooks = []
-                }
-
-                if !staleBooks.isEmpty {
-                    self.store.remove(staleBooks)
-                    staleBooks.forEach { self.reader.handleBookRemoved(path: $0.path) }
-                }
-
-                var currentPaths = Set(
-                    self.store.books.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path }
-                )
-                var addedCount = 0
-                newBooks.forEach { book in
-                    let path = URL(fileURLWithPath: book.path).standardizedFileURL.path
-                    guard !currentPaths.contains(path) else { return }
-                    self.store.add(book)
-                    currentPaths.insert(path)
-                    addedCount += 1
-                }
-
-                inferredAuthors.forEach { entry in
-                    guard let existing = self.store.books.first(where: {
-                        URL(fileURLWithPath: $0.path).standardizedFileURL.path == entry.path
-                    }), existing.author.isEmpty else {
-                        return
-                    }
-                    var updated = existing
-                    updated.author = entry.author
-                    self.store.update(updated)
-                }
-                self.refreshSidebar(scrollToTop: addedCount > 0)
-
-                if !syncAvailable {
-                    self.sidebar.setCloudStatus(.folderMissing, color: .systemOrange)
-                } else if addedCount > 0 || !staleBooks.isEmpty {
-                    self.sidebar.setCloudStatus(.syncCompleted(added: addedCount, removed: staleBooks.count))
-                } else {
-                    self.sidebar.setCloudStatus(.synced(bookCount: urls.count))
-                }
-                self.isSyncing = false
-            }
-        }
-    }
-
-    private func refreshLocalFolderStatus() {
-        let folderStore = LocalFolderStore.shared
-        guard folderStore.folderURL != nil else {
-            sidebar.setLocalStatus(.noFolder)
-            return
-        }
-        sidebar.setLocalStatus(
-            folderStore.isAvailable
-                ? .folderChosen(name: folderStore.folderName)
-                : .folderMissing
-        )
-    }
-
-    private func chooseLibraryFolder() {
-        switch activeLibrary {
-        case .iCloud:
-            chooseCloudFolder()
-        case .local:
-            chooseLocalFolder()
-        case .jianguoyun:
-            break
-        }
-    }
-
-    private func chooseLocalFolder() {
-        guard activeLibrary == .local else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = LocalFolderStore.shared.folderURL
-        panel.prompt = L("使用此文件夹", "Use Folder")
-        panel.message = L(
-            "选择用作本地书库的文件夹；点“扫描”可随时更新其中的书籍",
-            "Choose a folder as the local library; press Scan to refresh its books at any time"
-        )
-        panel.begin { [weak self] response in
-            guard response == .OK, let folder = panel.url else { return }
-            LocalFolderStore.shared.setFolder(folder)
-            self?.sidebar.setLocalStatus(.folderChosen(name: LocalFolderStore.shared.folderName))
-            self?.scanLocalFolder(showStatus: true)
-        }
-    }
-
-    private func scanLocalFolder(showStatus: Bool) {
-        guard activeLibrary == .local else { return }
-        guard !isScanningLocalFolder else { return }
-        let folderStore = LocalFolderStore.shared
-        guard folderStore.folderURL != nil else {
-            sidebar.setLocalStatus(.noFolder)
-            if showStatus {
-                chooseLocalFolder()
-            }
-            return
-        }
-        guard folderStore.isAvailable else {
-            sidebar.setLocalStatus(.folderMissing)
-            return
-        }
-
-        isScanningLocalFolder = true
-        if showStatus {
-            sidebar.setLocalStatus(.scanning)
-        }
-
-        let existingPaths = Set(store.books.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
-        let authorCandidatePaths = Set(
-            store.books
-                .filter { $0.source == .local && $0.author.isEmpty }
+                .filter { $0.source != .jianguoyun && $0.author.isEmpty }
                 .map { URL(fileURLWithPath: $0.path).standardizedFileURL.path }
         )
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let urls = folderStore.bookURLs()
+            urls.forEach { CloudFolderSync.shared.prepareForReading($0) }
             let urlsByPath = Dictionary(
                 urls.map { ($0.standardizedFileURL.path, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
             let newBooks = urls
                 .filter { !existingPaths.contains($0.standardizedFileURL.path) }
-                .map { BookImporter.book(from: $0, source: .local) }
+                .map { BookImporter.book(from: $0, source: folderSource) }
             let inferredAuthors: [(path: String, author: String)] = authorCandidatePaths.compactMap { path in
                 guard let url = urlsByPath[path] else { return nil }
                 let author = BookImporter.inferredAuthor(from: url)
@@ -11371,7 +12546,7 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
             DispatchQueue.main.async {
                 let folderPaths = Set(urlsByPath.keys)
                 let staleBooks = self.store.books.filter { book in
-                    book.source == .local &&
+                    book.source != .jianguoyun &&
                     folderStore.contains(URL(fileURLWithPath: book.path)) &&
                     !folderPaths.contains(URL(fileURLWithPath: book.path).standardizedFileURL.path)
                 }
@@ -11404,32 +12579,52 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
                 }
 
                 self.refreshSidebar(scrollToTop: addedCount > 0)
-                self.sidebar.setLocalStatus(.scanned(
+                self.sidebar.setFolderStatus(.scanned(
                     count: urls.count,
-                    folderName: folderStore.folderName
+                    folderName: folderStore.folderName,
+                    path: folderStore.displayPath
                 ))
-                self.isScanningLocalFolder = false
+                self.isScanningFolder = false
             }
         }
     }
 
-    private func chooseCloudFolder() {
-        guard activeLibrary == .iCloud else { return }
+    private func refreshFolderStatus() {
+        let folderStore = FolderLibraryStore.shared
+        guard folderStore.isAvailable else {
+            sidebar.setFolderStatus(.folderMissing(path: folderStore.displayPath))
+            return
+        }
+        sidebar.setFolderStatus(
+            .folderChosen(name: folderStore.folderName, path: folderStore.displayPath)
+        )
+    }
+
+    private func chooseLibraryFolder() {
+        guard activeShelf == .folder else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        let currentFolder = CloudFolderSync.shared.folderURL
+        let currentFolder = FolderLibraryStore.shared.folderURL
         if FileManager.default.fileExists(atPath: currentFolder.path) {
             panel.directoryURL = currentFolder
         }
-        panel.prompt = L("选择此文件夹", "Choose")
-        panel.message = L("请选择 iCloud Drive 中的“极简阅读”文件夹", "Choose the “极简阅读” folder in iCloud Drive")
+        panel.prompt = L("使用此文件夹", "Use Folder")
+        panel.message = L(
+            "选择用作书库的文件夹，默认是 iCloud Drive 中的“极简阅读”；点“扫描”可随时更新其中的书籍",
+            "Choose a folder as the library; the “极简阅读” folder in iCloud Drive by default. Press Scan to refresh its books at any time"
+        )
         panel.begin { [weak self] response in
             guard response == .OK, let folder = panel.url else { return }
-            CloudFolderSync.shared.setFolder(folder)
-            self?.sidebar.setCloudStatus(.folderChosen(path: CloudFolderSync.shared.displayPath))
-            self?.syncFromCloud(showStatus: true)
+            FolderLibraryStore.shared.setFolder(folder)
+            self?.sidebar.setActiveShelf(.folder)
+            self?.sidebar.setFolderStatus(.folderChosen(
+                name: FolderLibraryStore.shared.folderName,
+                path: FolderLibraryStore.shared.displayPath
+            ))
+            self?.scanFolderLibrary(showStatus: true)
         }
     }
 
@@ -11440,15 +12635,18 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         panel.allowedContentTypes = ["txt", "epub", "pdf", "mobi", "azw", "azw3", "md", "markdown"].compactMap {
             UTType(filenameExtension: $0)
         }
-        switch activeLibrary {
-        case .iCloud:
-            panel.message = L("选择要复制到 iCloud“极简阅读”文件夹的书籍",
-                              "Choose books to copy into the iCloud “极简阅读” folder")
-        case .jianguoyun:
+        switch activeShelf {
+        case .folder:
+            if CloudFolderSync.isICloudDriveFolder(FolderLibraryStore.shared.folderURL) {
+                panel.message = L("选择要复制到 iCloud 书库文件夹的书籍",
+                                  "Choose books to copy into the iCloud library folder")
+            } else {
+                panel.message = L("选择要加入书库的本机文件；不会上传",
+                                  "Choose files to add to the library; nothing is uploaded")
+            }
+        case .webdav:
             panel.message = L("选择要加入 WebDAV 书库的本机书籍；上传前会再次确认",
                               "Choose books to add to the WebDAV library; uploading is confirmed first")
-        case .local:
-            panel.message = L("选择要加入本地书库的文件", "Choose files to add to the local library")
         }
         panel.begin { [weak self] response in
             guard response == .OK else { return }
@@ -11612,6 +12810,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         aboutItem.target = NSApp
         appMenu.addItem(aboutItem)
+        let proItem = NSMenuItem(
+            title: L("解锁 EasyRead Pro（¥8）…", "Unlock EasyRead Pro (¥8)…"),
+            action: #selector(MainViewController.showProUnlockFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        proItem.target = mainViewController
+        appMenu.addItem(proItem)
         appMenu.addItem(.separator())
 
         let languageMenuItem = NSMenuItem(title: L("语言 / Language", "Language / 语言"), action: nil, keyEquivalent: "")
@@ -11681,14 +12886,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let libraryMenuItem = NSMenuItem(title: L("书库", "Library"), action: nil, keyEquivalent: "")
         let libraryMenu = NSMenu(title: L("书库", "Library"))
-        for (index, library) in BookSource.allCases.enumerated() {
+        for (index, shelf) in LibraryShelf.allCases.enumerated() {
             let item = NSMenuItem(
-                title: library.libraryTitle,
+                title: shelf.title,
                 action: #selector(MainViewController.switchLibraryFromMenu(_:)),
                 keyEquivalent: "\(index + 1)"
             )
             item.target = mainViewController
-            item.representedObject = library.rawValue
+            item.representedObject = shelf.rawValue
             libraryMenu.addItem(item)
         }
         libraryMenu.addItem(.separator())

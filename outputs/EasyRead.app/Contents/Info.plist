@@ -48,11 +48,13 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.9.4</string>
+	<string>0.9.5</string>
 	<key>CFBundleVersion</key>
-	<string>43</string>
+	<string>44</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
+	<key>EasyReadProPurchaseURL</key>
+	<string></string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>EasyRead 需要读取“文稿”中的书籍文件，以显示本地书库并保存阅读进度。</string>
 	<key>NSAppTransportSecurity</key>
