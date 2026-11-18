@@ -113,6 +113,8 @@ MOBI, AZW, and AZW3 books are decoded by the built-in parser in a background thr
 
 The folder library, imports, reading, bookmarks, and notes are free. The WebDAV library is a one-time **¥8** Pro unlock. Pro covers the WebDAV shelf itself, sync settings, upload/download, and automatic sync.
 
+Support the project on 爱发电: <https://ifdian.net/a/easyread>
+
 Create a ¥8 product on **爱发电** (preferred, because it has order Webhooks and batch automatic replies) or **面包多**, then put the product URL in `Info.plist`:
 
 ```text
@@ -325,6 +327,8 @@ MOBI、AZW、AZW3 文件由内置解析器在后台线程解码，图片只写�
 ## EasyRead Pro（¥8 解锁 WebDAV）
 
 “书库”（本地文件夹或 iCloud Drive）永久免费，WebDAV 书库需一次性购买 **EasyRead Pro（¥8）**。Pro 包含 WebDAV 书架、同步设置、上传 / 下载和自动同步；授权码在本机离线校验，不需要注册账号或联网激活。
+
+支持作者 / 爱发电主页：<https://ifdian.net/a/easyread>
 
 购买链接配置：在**爱发电**（优先，支持订单 Webhook 和批量自动回复）或**面包多**创建 ¥8 商品，把商品链接填入 `Info.plist` 的 `EasyReadProPurchaseURL`，然后重新构建。链接为空时，Pro 窗口的购买按钮会提示“购买链接尚未配置”。
 
