@@ -2,6 +2,8 @@
 
 A minimal native reading app for Intel-based Macs. EasyRead is an independent AppKit reimplementation of a local reading workflow; it does not copy code or assets from the original app.
 
+Support this project on 爱发电: <https://ifdian.net/a/easyread>
+
 ## Repository
 
 The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.com/KBDZequalsCK/EasyRead) as a public repository.
