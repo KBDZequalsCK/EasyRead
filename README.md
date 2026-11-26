@@ -2,8 +2,6 @@
 
 A minimal native reading app for Intel-based Macs. EasyRead is an independent AppKit reimplementation of a local reading workflow; it does not copy code or assets from the original app.
 
-Support this project on 爱发电: <https://ifdian.net/a/easyread>
-
 ## Repository
 
 The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.com/KBDZequalsCK/EasyRead) as a public repository.
@@ -120,8 +118,6 @@ MOBI, AZW, and AZW3 books are decoded by the built-in parser in a background thr
 ## Free for Everyone
 
 All features are free, including the WebDAV library. There is no Pro license, purchase, activation code, or account. The WebDAV shelf, sync settings, upload/download, and automatic sync work without any unlock.
-
-If you would like to support development, you can do so on 爱发电: <https://ifdian.net/a/easyread>
 
 ## iCloud
 
@@ -311,8 +307,6 @@ MOBI、AZW、AZW3 文件由内置解析器在后台线程解码，图片只写�
 ## 免费使用
 
 全部功能免费，包括 WebDAV 书库：没有 Pro 授权、购买、激活码或账号。WebDAV 书架、同步设置、上传 / 下载和自动同步都不需要解锁。
-
-如果愿意支持作者，可以访问爱发电主页：<https://ifdian.net/a/easyread>
 
 ## iCloud 说明
 
