@@ -21,15 +21,15 @@ fi
 ARCHS="$(lipo -archs "$EXECUTABLE")"
 if [[ "$ARCHS" == *x86_64* && "$ARCHS" == *arm64* ]]; then
   ARCH_LABEL="Universal"
-  DMG_PATH="$OUTPUT_DIR/EasyRead-Universal.dmg"
+  DMG_PATH="$OUTPUT_DIR/EasyRead-Mac-Universal.dmg"
   VOLUME_NAME="EasyRead Universal"
 elif [[ "$ARCHS" == *arm64* ]]; then
   ARCH_LABEL="ARM64"
-  DMG_PATH="$OUTPUT_DIR/EasyRead-ARM64.dmg"
+  DMG_PATH="$OUTPUT_DIR/EasyRead-Mac-ARM64.dmg"
   VOLUME_NAME="EasyRead ARM64"
 elif [[ "$ARCHS" == *x86_64* ]]; then
   ARCH_LABEL="Intel"
-  DMG_PATH="$OUTPUT_DIR/EasyRead-Intel.dmg"
+  DMG_PATH="$OUTPUT_DIR/EasyRead-Mac-Intel.dmg"
   VOLUME_NAME="EasyRead Intel"
 else
   echo "Unsupported executable architecture: $ARCHS" >&2

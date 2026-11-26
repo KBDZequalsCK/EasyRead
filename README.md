@@ -120,10 +120,10 @@ To create the distributable DMG (after building the app):
 
 ```sh
 ./package-dmg.sh
-open "outputs/EasyRead-Intel.dmg"
+open "outputs/EasyRead-Mac-Intel.dmg"
 ```
 
-The DMG is named after the built architecture (`EasyRead-Intel.dmg`, `EasyRead-ARM64.dmg`, or `EasyRead-Universal.dmg`). It contains the app, an Applications shortcut, and a bilingual installation guide. Ordinary users should download the DMG from the repository's [Releases](https://github.com/KBDZequalsCK/EasyRead-Mac/releases) page instead of downloading the source ZIP.
+The DMG is named after the built architecture (`EasyRead-Mac-Intel.dmg`, `EasyRead-Mac-ARM64.dmg`, or `EasyRead-Mac-Universal.dmg`). It contains the app, an Applications shortcut, and a bilingual installation guide. Ordinary users should download the DMG from the repository's [Releases](https://github.com/KBDZequalsCK/EasyRead-Mac/releases) page instead of downloading the source ZIP.
 
 MOBI, AZW, and AZW3 books are decoded by the built-in parser in a background thread; images are written only to a temporary directory. No external converter is launched. DRM-protected Kindle books cannot be decoded and show an explicit message instead.
 
@@ -321,10 +321,10 @@ arm64 和 universal 构建会对整个 App bundle 做 ad-hoc 签名，因为 App
 
 ```sh
 ./package-dmg.sh
-open "outputs/EasyRead-Intel.dmg"
+open "outputs/EasyRead-Mac-Intel.dmg"
 ```
 
-DMG 按构建架构命名（`EasyRead-Intel.dmg`、`EasyRead-ARM64.dmg` 或 `EasyRead-Universal.dmg`），内含 App、“应用程序”文件夹快捷方式和双语安装说明。普通用户应从仓库的 [Releases](https://github.com/KBDZequalsCK/EasyRead-Mac/releases) 页面下载 DMG，不必下载源码 ZIP。
+DMG 按构建架构命名（`EasyRead-Mac-Intel.dmg`、`EasyRead-Mac-ARM64.dmg` 或 `EasyRead-Mac-Universal.dmg`），内含 App、“应用程序”文件夹快捷方式和双语安装说明。普通用户应从仓库的 [Releases](https://github.com/KBDZequalsCK/EasyRead-Mac/releases) 页面下载 DMG，不必下载源码 ZIP。
 
 MOBI、AZW、AZW3 文件由内置解析器在后台线程解码，图片只写入临时目录，不再启动任何外部转换程序。带 DRM 的 Kindle 电子书无法解码，会显示明确提示。
 

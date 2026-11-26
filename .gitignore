@@ -4,3 +4,6 @@ outputs/EasyRead-Intel.dmg
 outputs/EasyRead-Intel-*.dmg
 outputs/EasyRead-ARM64*.dmg
 outputs/EasyRead-Universal*.dmg
+outputs/EasyRead-Mac-Intel*.dmg
+outputs/EasyRead-Mac-ARM64*.dmg
+outputs/EasyRead-Mac-Universal*.dmg
