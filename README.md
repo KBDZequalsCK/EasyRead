@@ -1,10 +1,22 @@
-# EasyRead for Intel Mac
+# EasyRead for Mac
 
-A minimal native reading app for Intel-based Macs. EasyRead is an independent AppKit reimplementation of a local reading workflow; it does not copy code or assets from the original app.
+A minimal native reading app for macOS, on Apple silicon (M-series) and Intel Macs alike. EasyRead is an independent AppKit reimplementation of a local reading workflow; it does not copy code or assets from the original app.
 
 ## Repository
 
-The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.com/KBDZequalsCK/EasyRead) as a public repository.
+The project is published at [github.com/KBDZequalsCK/EasyRead-Mac](https://github.com/KBDZequalsCK/EasyRead-Mac) as a public repository. The repository used to be named `EasyRead`; old links redirect here.
+
+## Requirements
+
+- macOS 12.0 or later, on Apple silicon or Intel.
+- Apple silicon: use the `arm64` or universal build to run natively. The plain `x86_64` build also works there through Rosetta 2.
+- Building from source needs the Xcode command line tools (Swift 5.8 or later). Nothing else — every book format is decoded inside the app.
+
+```sh
+ARCH=universal ./build.sh   # one app that runs natively on both chip families
+```
+
+Application data (shelf, bookmarks, caches, downloaded WebDAV books) lives in `~/Library/Application Support/IntelReader/`. That folder name and the bundle identifier `local.codex.intelreader` are the app's original internal names and are deliberately left alone: renaming them would orphan every existing library, reading position, and preference. They say nothing about which CPUs are supported.
 
 ## Features
 
@@ -67,17 +79,17 @@ The project is published at [github.com/KBDZequalsCK/EasyRead](https://github.co
 
 ## Project Layout
 
-- `Sources/IntelReader/main.swift`: application source
-- `Sources/IntelReader/MarkdownRenderer.swift`: dependency-free Markdown-to-HTML renderer used by the reader
-- `Sources/IntelReader/MOBIParser.swift`: dependency-free MOBI/AZW/AZW3 decoder (PalmDOC, HUFF/CDIC, KF8 reconstruction, images)
-- `Sources/IntelReader/ZipArchive.swift`: in-process ZIP reader for EPUB, using the macOS system zlib
-- `Sources/IntelReader/FB2Renderer.swift`: FictionBook (FB2) to HTML renderer
-- `Sources/IntelReader/ComicRenderer.swift`: CBZ page-image comic renderer
-- `Sources/IntelReader/ComicReaderView.swift`: native single/two-page comic reader with on-demand page loading
-- `Sources/IntelReader/RTFRenderer.swift`: RTF text renderer
-- `Sources/IntelReader/DOCXRenderer.swift`: DOCX (WordprocessingML) renderer
-- `Sources/IntelReader/ChapterHeading.swift`: shared chapter-heading heuristic
-- `Sources/IntelReader/BookmarkStore.swift`: bookmark/note persistence (`bookmarks.json`)
+- `Sources/EasyRead/main.swift`: application source
+- `Sources/EasyRead/MarkdownRenderer.swift`: dependency-free Markdown-to-HTML renderer used by the reader
+- `Sources/EasyRead/MOBIParser.swift`: dependency-free MOBI/AZW/AZW3 decoder (PalmDOC, HUFF/CDIC, KF8 reconstruction, images)
+- `Sources/EasyRead/ZipArchive.swift`: in-process ZIP reader for EPUB, using the macOS system zlib
+- `Sources/EasyRead/FB2Renderer.swift`: FictionBook (FB2) to HTML renderer
+- `Sources/EasyRead/ComicRenderer.swift`: CBZ page-image comic renderer
+- `Sources/EasyRead/ComicReaderView.swift`: native single/two-page comic reader with on-demand page loading
+- `Sources/EasyRead/RTFRenderer.swift`: RTF text renderer
+- `Sources/EasyRead/DOCXRenderer.swift`: DOCX (WordprocessingML) renderer
+- `Sources/EasyRead/ChapterHeading.swift`: shared chapter-heading heuristic
+- `Sources/EasyRead/BookmarkStore.swift`: bookmark/note persistence (`bookmarks.json`)
 - `Info.plist`: app metadata and document type declarations
 - `build.sh`: build script for `x86_64`, `arm64`, or universal builds (defaults to Intel `x86_64`)
 - `package-dmg.sh`: creates a distributable DMG named for the app architecture, with an installation guide
@@ -111,7 +123,7 @@ To create the distributable DMG (after building the app):
 open "outputs/EasyRead-Intel.dmg"
 ```
 
-The DMG is named after the built architecture (`EasyRead-Intel.dmg`, `EasyRead-ARM64.dmg`, or `EasyRead-Universal.dmg`). It contains the app, an Applications shortcut, and a bilingual installation guide. Ordinary users should download the DMG from the repository's **Releases** page instead of downloading the source ZIP.
+The DMG is named after the built architecture (`EasyRead-Intel.dmg`, `EasyRead-ARM64.dmg`, or `EasyRead-Universal.dmg`). It contains the app, an Applications shortcut, and a bilingual installation guide. Ordinary users should download the DMG from the repository's [Releases](https://github.com/KBDZequalsCK/EasyRead-Mac/releases) page instead of downloading the source ZIP.
 
 MOBI, AZW, and AZW3 books are decoded by the built-in parser in a background thread; images are written only to a temporary directory. No external converter is launched. DRM-protected Kindle books cannot be decoded and show an explicit message instead.
 
@@ -183,11 +195,23 @@ Limits:
 
 ---
 
-# EasyRead Intel 版
+# EasyRead Mac 版
 
-一个面向 Intel 芯片 Mac 的本地极简阅读器原型。它不是对原 App 的代码或素材复制，而是用原生 AppKit 重实现类似的本地阅读体验。
+一个面向 macOS 的本地极简阅读器，Apple 芯片（M 系列）与 Intel 芯片的 Mac 都能用。它不是对原 App 的代码或素材复制，而是用原生 AppKit 重实现类似的本地阅读体验。
 
-GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
+GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead-Mac>（仓库原名 `EasyRead`，旧链接会自动跳转到这里）
+
+## 系统要求
+
+- macOS 12.0 或更高版本，Apple 芯片或 Intel 芯片均可。
+- Apple 芯片建议用 `arm64` 或 Universal 构建以原生运行；纯 `x86_64` 构建也能通过 Rosetta 2 使用。
+- 从源码构建只需要 Xcode 命令行工具（Swift 5.8 或更新），不需要安装其他软件，所有书籍格式都由 App 自己解码。
+
+```sh
+ARCH=universal ./build.sh   # 一次构建，两种芯片都原生运行
+```
+
+书架、书签、缓存和 WebDAV 下载的书籍都放在 `~/Library/Application Support/IntelReader/`。这个目录名和 Bundle Identifier `local.codex.intelreader` 是项目最早期的内部命名，**故意保留不改**：改了会让老用户的书架、阅读进度和偏好全部变成孤儿数据。它们与支持的 CPU 架构没有任何关系。
 
 ## 当前功能
 
@@ -256,17 +280,17 @@ GitHub 公开仓库：<https://github.com/KBDZequalsCK/EasyRead>
 
 ## 项目目录说明
 
-- `Sources/IntelReader/main.swift`：主程序源码
-- `Sources/IntelReader/MarkdownRenderer.swift`：阅读器使用的轻量 Markdown → HTML 渲染器，不依赖第三方库
-- `Sources/IntelReader/MOBIParser.swift`：内置的 MOBI/AZW/AZW3 解码器（PalmDOC、HUFF/CDIC、KF8 重组、图片），不依赖第三方库
-- `Sources/IntelReader/ZipArchive.swift`：内置的 EPUB ZIP 读取器，使用 macOS 系统 zlib，不依赖第三方库
-- `Sources/IntelReader/FB2Renderer.swift`：FB2（FictionBook）转 HTML 渲染器
-- `Sources/IntelReader/ComicRenderer.swift`：CBZ 漫画页面渲染器
-- `Sources/IntelReader/ComicReaderView.swift`：原生单页/双页漫画阅读视图，页面按需加载
-- `Sources/IntelReader/RTFRenderer.swift`：RTF 文本渲染器
-- `Sources/IntelReader/DOCXRenderer.swift`：DOCX（WordprocessingML）渲染器
-- `Sources/IntelReader/ChapterHeading.swift`：共用的章节标题判断
-- `Sources/IntelReader/BookmarkStore.swift`：书签/笔记持久化（`bookmarks.json`）
+- `Sources/EasyRead/main.swift`：主程序源码
+- `Sources/EasyRead/MarkdownRenderer.swift`：阅读器使用的轻量 Markdown → HTML 渲染器，不依赖第三方库
+- `Sources/EasyRead/MOBIParser.swift`：内置的 MOBI/AZW/AZW3 解码器（PalmDOC、HUFF/CDIC、KF8 重组、图片），不依赖第三方库
+- `Sources/EasyRead/ZipArchive.swift`：内置的 EPUB ZIP 读取器，使用 macOS 系统 zlib，不依赖第三方库
+- `Sources/EasyRead/FB2Renderer.swift`：FB2（FictionBook）转 HTML 渲染器
+- `Sources/EasyRead/ComicRenderer.swift`：CBZ 漫画页面渲染器
+- `Sources/EasyRead/ComicReaderView.swift`：原生单页/双页漫画阅读视图，页面按需加载
+- `Sources/EasyRead/RTFRenderer.swift`：RTF 文本渲染器
+- `Sources/EasyRead/DOCXRenderer.swift`：DOCX（WordprocessingML）渲染器
+- `Sources/EasyRead/ChapterHeading.swift`：共用的章节标题判断
+- `Sources/EasyRead/BookmarkStore.swift`：书签/笔记持久化（`bookmarks.json`）
 - `Info.plist`：App 元数据与文档类型声明
 - `build.sh`：构建 `x86_64`、`arm64` 或 Universal 版 App 的脚本（默认 Intel `x86_64`）
 - `package-dmg.sh`：按 App 架构生成带安装说明的 DMG
@@ -300,7 +324,7 @@ arm64 和 universal 构建会对整个 App bundle 做 ad-hoc 签名，因为 App
 open "outputs/EasyRead-Intel.dmg"
 ```
 
-DMG 按构建架构命名（`EasyRead-Intel.dmg`、`EasyRead-ARM64.dmg` 或 `EasyRead-Universal.dmg`），内含 App、“应用程序”文件夹快捷方式和双语安装说明。普通用户应从仓库的 **Releases** 页面下载 DMG，不必下载源码 ZIP。
+DMG 按构建架构命名（`EasyRead-Intel.dmg`、`EasyRead-ARM64.dmg` 或 `EasyRead-Universal.dmg`），内含 App、“应用程序”文件夹快捷方式和双语安装说明。普通用户应从仓库的 [Releases](https://github.com/KBDZequalsCK/EasyRead-Mac/releases) 页面下载 DMG，不必下载源码 ZIP。
 
 MOBI、AZW、AZW3 文件由内置解析器在后台线程解码，图片只写入临时目录，不再启动任何外部转换程序。带 DRM 的 Kindle 电子书无法解码，会显示明确提示。
 

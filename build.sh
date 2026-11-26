@@ -7,7 +7,7 @@ STAGE_APP_DIR="$BUILD_DIR/EasyRead.app"
 OUTPUT_DIR="$ROOT_DIR/outputs"
 APP_DIR="$OUTPUT_DIR/EasyRead.app"
 CONTENTS_DIR="$STAGE_APP_DIR/Contents"
-EXECUTABLE_NAME="IntelReader"
+EXECUTABLE_NAME="EasyRead"
 ICON_SOURCE="$ROOT_DIR/Resources/AppIcon.png"
 ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"
 
@@ -22,19 +22,19 @@ case "$ARCH" in
 esac
 
 SOURCES=(
-  "$ROOT_DIR/Sources/IntelReader/MarkdownRenderer.swift"
-  "$ROOT_DIR/Sources/IntelReader/MOBIParser.swift"
-  "$ROOT_DIR/Sources/IntelReader/ZipArchive.swift"
-  "$ROOT_DIR/Sources/IntelReader/BookmarkStore.swift"
-  "$ROOT_DIR/Sources/IntelReader/ChapterHeading.swift"
-  "$ROOT_DIR/Sources/IntelReader/FB2Renderer.swift"
-  "$ROOT_DIR/Sources/IntelReader/ComicRenderer.swift"
-  "$ROOT_DIR/Sources/IntelReader/ComicReaderView.swift"
-  "$ROOT_DIR/Sources/IntelReader/RTFRenderer.swift"
-  "$ROOT_DIR/Sources/IntelReader/DOCXRenderer.swift"
-  "$ROOT_DIR/Sources/IntelReader/ReaderPagerScript.swift"
-  "$ROOT_DIR/Sources/IntelReader/BookCoverLoader.swift"
-  "$ROOT_DIR/Sources/IntelReader/main.swift"
+  "$ROOT_DIR/Sources/EasyRead/MarkdownRenderer.swift"
+  "$ROOT_DIR/Sources/EasyRead/MOBIParser.swift"
+  "$ROOT_DIR/Sources/EasyRead/ZipArchive.swift"
+  "$ROOT_DIR/Sources/EasyRead/BookmarkStore.swift"
+  "$ROOT_DIR/Sources/EasyRead/ChapterHeading.swift"
+  "$ROOT_DIR/Sources/EasyRead/FB2Renderer.swift"
+  "$ROOT_DIR/Sources/EasyRead/ComicRenderer.swift"
+  "$ROOT_DIR/Sources/EasyRead/ComicReaderView.swift"
+  "$ROOT_DIR/Sources/EasyRead/RTFRenderer.swift"
+  "$ROOT_DIR/Sources/EasyRead/DOCXRenderer.swift"
+  "$ROOT_DIR/Sources/EasyRead/ReaderPagerScript.swift"
+  "$ROOT_DIR/Sources/EasyRead/BookCoverLoader.swift"
+  "$ROOT_DIR/Sources/EasyRead/main.swift"
 )
 
 build_slice() {
@@ -55,8 +55,8 @@ mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources" "$OUTPUT_DIR"
 
 EXECUTABLE="$CONTENTS_DIR/MacOS/$EXECUTABLE_NAME"
 if [[ "$ARCH" == "universal" ]]; then
-  X86_BINARY="$BUILD_DIR/IntelReader-x86_64"
-  ARM_BINARY="$BUILD_DIR/IntelReader-arm64"
+  X86_BINARY="$BUILD_DIR/$EXECUTABLE_NAME-x86_64"
+  ARM_BINARY="$BUILD_DIR/$EXECUTABLE_NAME-arm64"
   build_slice x86_64 "$X86_BINARY"
   build_slice arm64 "$ARM_BINARY"
   lipo -create "$X86_BINARY" "$ARM_BINARY" -output "$EXECUTABLE"
@@ -73,7 +73,7 @@ if [[ -f "$ICON_SOURCE" ]]; then
   done
   iconutil -c icns "$ICONSET_DIR" -o "$CONTENTS_DIR/Resources/AppIcon.icns"
 fi
-chmod +x "$CONTENTS_DIR/MacOS/IntelReader"
+chmod +x "$EXECUTABLE"
 ditto "$STAGE_APP_DIR" "$APP_DIR"
 
 # Signing strategy:
@@ -88,7 +88,7 @@ ditto "$STAGE_APP_DIR" "$APP_DIR"
 #   so switching between unsigned x86_64 and universal builds may prompt for
 #   saved WebDAV passwords again.
 if [[ "$ARCH" == "x86_64" ]]; then
-  codesign --remove-signature "$APP_DIR/Contents/MacOS/IntelReader" 2>/dev/null || true
+  codesign --remove-signature "$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME" 2>/dev/null || true
 else
   codesign --force --sign - --timestamp=none "$APP_DIR"
   codesign --verify --arch arm64 "$APP_DIR"
@@ -97,5 +97,5 @@ fi
 rm -rf "$BUILD_DIR"
 
 echo "Built ($ARCH): $APP_DIR"
-file "$APP_DIR/Contents/MacOS/IntelReader"
-lipo -archs "$APP_DIR/Contents/MacOS/IntelReader"
+file "$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"
+lipo -archs "$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"

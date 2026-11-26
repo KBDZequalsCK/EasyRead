@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$ROOT_DIR/outputs/EasyRead.app"
 OUTPUT_DIR="$ROOT_DIR/outputs"
-EXECUTABLE="$APP_DIR/Contents/MacOS/IntelReader"
+EXECUTABLE="$APP_DIR/Contents/MacOS/EasyRead"
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/easyread-dmg.XXXXXX")"
 
 cleanup() {

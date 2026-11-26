@@ -17,4 +17,4 @@ EasyRead Installation Guide
 
 5. 项目源码、开发者构建方法和问题反馈：
    Source code, developer build instructions, and issue reporting:
-   https://github.com/KBDZequalsCK/EasyRead
+   https://github.com/KBDZequalsCK/EasyRead-Mac
