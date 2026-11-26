@@ -6561,10 +6561,8 @@ final class SidebarViewController: NSViewController {
     var onZenSettings: (() -> Void)?
     var onClearLibrary: (() -> Void)?
     var onSwitchLibrary: ((LibraryShelf) -> Void)?
-    var onShowPro: (() -> Void)?
 
     private(set) var activeShelf: LibraryShelf = .folder
-    private var isProUnlocked = false
 
     private let scrollView = NSScrollView()
     private let listContainer = NSView()
@@ -6930,24 +6928,10 @@ final class SidebarViewController: NSViewController {
 
     // MARK: - Active library
 
-    func setProUnlocked(_ unlocked: Bool) {
-        isProUnlocked = unlocked
-        if activeShelf == .webdav {
-            libraryTitleLabel.stringValue = displayTitle(for: activeShelf)
-        }
-    }
-
-    private func displayTitle(for shelf: LibraryShelf) -> String {
-        if shelf == .webdav && !isProUnlocked {
-            return L("WebDAV 书库（Pro）", "WebDAV Library (Pro)")
-        }
-        return shelf.title
-    }
-
     func setActiveShelf(_ shelf: LibraryShelf) {
         activeShelf = shelf
         libraryIcon.image = NSImage(systemSymbolName: shelf.symbolName, accessibilityDescription: nil)
-        libraryTitleLabel.stringValue = displayTitle(for: shelf)
+        libraryTitleLabel.stringValue = shelf.title
         syncButton.isHidden = false
         syncButtonWidthConstraint?.constant = 46
         accessoryButton.isHidden = false
@@ -6993,55 +6977,35 @@ final class SidebarViewController: NSViewController {
     @objc private func libraryClicked() {
         let menu = NSMenu()
         for shelf in LibraryShelf.allCases {
-            let locked = shelf == .webdav && !isProUnlocked
             let item = NSMenuItem(
-                title: displayTitle(for: shelf),
-                action: locked ? #selector(proShelfClicked) : #selector(chooseLibrary(_:)),
+                title: shelf.title,
+                action: #selector(chooseLibrary(_:)),
                 keyEquivalent: ""
             )
             item.target = self
             item.representedObject = shelf.rawValue
             item.state = shelf == activeShelf ? .on : .off
             item.image = NSImage(
-                systemSymbolName: locked ? "lock.fill" : shelf.symbolName,
+                systemSymbolName: shelf.symbolName,
                 accessibilityDescription: nil
             )
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        if isProUnlocked {
-            let note = NSMenuItem(
-                title: L("书库扫描一个文件夹；WebDAV 书库单独同步",
-                        "The Library shelf scans one folder; WebDAV Library syncs separately"),
-                action: nil,
-                keyEquivalent: ""
-            )
-            note.isEnabled = false
-            menu.addItem(note)
-        } else {
-            let proItem = NSMenuItem(
-                title: L("解锁 EasyRead Pro（¥8）…", "Unlock EasyRead Pro (¥8)…"),
-                action: #selector(proShelfClicked),
-                keyEquivalent: ""
-            )
-            proItem.target = self
-            proItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
-            menu.addItem(proItem)
-        }
+        let note = NSMenuItem(
+            title: L("书库扫描一个文件夹；WebDAV 书库单独同步",
+                    "The Library shelf scans one folder; WebDAV Library syncs separately"),
+            action: nil,
+            keyEquivalent: ""
+        )
+        note.isEnabled = false
+        menu.addItem(note)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: libraryBar.bounds.minY - 6), in: libraryBar)
-    }
-
-    @objc private func proShelfClicked() {
-        onShowPro?()
     }
 
     @objc private func chooseLibrary(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let shelf = LibraryShelf(rawValue: raw) else { return }
-        if shelf == .webdav && !isProUnlocked {
-            onShowPro?()
-            return
-        }
         guard shelf != activeShelf else { return }
         onSwitchLibrary?(shelf)
     }
@@ -11009,7 +10973,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     private var isZenSyncing = false
     private var lastZenSyncDate: Date?
     private var zenSettingsController: ZenSyncSettingsWindowController?
-    private var proUnlockController: ProUnlockWindowController?
     private var activationObserver: NSObjectProtocol?
     private var resignActiveObserver: NSObjectProtocol?
     private var languageObserver: NSObjectProtocol?
@@ -11018,9 +10981,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         let defaults = UserDefaults.standard
         if let raw = defaults.string(forKey: MainViewController.activeShelfKey),
            let saved = LibraryShelf(rawValue: raw) {
-            if saved == .webdav && !ProLicenseManager.shared.isPro {
-                return .folder
-            }
             return saved
         }
         // Migrate the old three-way choice: anything that was not WebDAV is
@@ -11028,13 +10988,10 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         if let raw = defaults.string(forKey: MainViewController.legacyActiveLibraryKey),
            let saved = BookSource(rawValue: raw) {
             let shelf: LibraryShelf = saved == .jianguoyun ? .webdav : .folder
-            if shelf == .webdav && !ProLicenseManager.shared.isPro {
-                return .folder
-            }
             defaults.set(shelf.rawValue, forKey: MainViewController.activeShelfKey)
             return shelf
         }
-        if ZenReaderSync.shared.isConfigured && ProLicenseManager.shared.isPro {
+        if ZenReaderSync.shared.isConfigured {
             return .webdav
         }
         return .folder
@@ -11115,7 +11072,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         sidebar.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         sidebar.onSelect = { [weak self] book in self?.openBook(book) }
         sidebar.onSwitchLibrary = { [weak self] library in self?.switchLibrary(to: library) }
-        sidebar.onShowPro = { [weak self] in self?.showProUnlock() }
         reader.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         reader.onThemeChanged = { [weak self] isDark in self?.applyTheme(isDark: isDark) }
         reader.onChaptersRequested = { [weak self] book, completion in
@@ -11143,7 +11099,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         sidebar.onZenSettings = { [weak self] in
             self?.showZenSyncSettings(startSync: false)
         }
-        sidebar.setProUnlocked(ProLicenseManager.shared.isPro)
         sidebar.setActiveShelf(activeShelf)
         refreshSidebar(scrollToTop: true)
         sidebar.setFolderStatus(.ready)
@@ -11248,10 +11203,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func switchLibrary(to shelf: LibraryShelf) {
-        guard shelf != .webdav || ProLicenseManager.shared.isPro else {
-            showProUnlock()
-            return
-        }
         guard shelf != activeShelf else { return }
         activeShelf = shelf
         UserDefaults.standard.set(shelf.rawValue, forKey: Self.activeShelfKey)
@@ -11281,7 +11232,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         NSApp.appearance = appearance
         view.window?.appearance = appearance
         zenSettingsController?.applyAppearance(appearance)
-        proUnlockController?.applyAppearance(appearance)
         rootView.layer?.backgroundColor = (isDark
             ? NSColor(calibratedWhite: 0.105, alpha: 1)
             : NSColor.white).cgColor
@@ -11305,7 +11255,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func refreshZenStatusForCurrentConfiguration() {
-        guard ProLicenseManager.shared.isPro else { return }
         // `sidebar.setActiveLibrary` already rendered the stored live stage.
         // Replacing it with “ready” here would hide a running sync.
         guard !isZenSyncing else { return }
@@ -11320,7 +11269,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func syncZenOnResignActive() {
-        guard ProLicenseManager.shared.isPro else { return }
         guard activeShelf == .webdav else { return }
         guard ZenReaderSync.shared.autoSyncEnabled else { return }
         guard ZenReaderSync.shared.isConfigured, !isZenSyncing else { return }
@@ -11331,7 +11279,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func maybeAutoSyncZen() {
-        guard ProLicenseManager.shared.isPro else { return }
         guard activeShelf == .webdav else { return }
         guard ZenReaderSync.shared.hasServerAndAccount else {
             sidebar.setZenStatus(.notConfigured)
@@ -11354,10 +11301,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         case .folder:
             scanFolderLibrary(showStatus: true)
         case .webdav:
-            guard ProLicenseManager.shared.isPro else {
-                showProUnlock()
-                return
-            }
             showZenSyncSettings(startSync: false)
         }
     }
@@ -11390,20 +11333,12 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
             return !activeBooks.isEmpty
         case #selector(zenSettingsFromMenu):
             return activeShelf == .webdav
-        case #selector(showProUnlockFromMenu(_:)):
-            menuItem.title = ProLicenseManager.shared.isPro
-                ? L("EasyRead Pro（已解锁）…", "EasyRead Pro (Unlocked)…")
-                : L("解锁 EasyRead Pro（¥8）…", "Unlock EasyRead Pro (¥8)…")
-            return true
         case #selector(switchLibraryFromMenu(_:)):
             if let raw = menuItem.representedObject as? String,
                let shelf = LibraryShelf(rawValue: raw) {
-                let locked = shelf == .webdav && !ProLicenseManager.shared.isPro
-                menuItem.title = locked
-                    ? L("WebDAV 书库（Pro）", "WebDAV Library (Pro)")
-                    : shelf.title
+                menuItem.title = shelf.title
                 menuItem.image = NSImage(
-                    systemSymbolName: locked ? "lock.fill" : shelf.symbolName,
+                    systemSymbolName: shelf.symbolName,
                     accessibilityDescription: nil
                 )
                 menuItem.state = shelf == activeShelf ? .on : .off
@@ -11414,16 +11349,8 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         }
     }
 
-    @objc func showProUnlockFromMenu(_ sender: Any?) {
-        showProUnlock()
-    }
-
     @objc func zenSettingsFromMenu() {
         guard activeShelf == .webdav else { return }
-        guard ProLicenseManager.shared.isPro else {
-            showProUnlock()
-            return
-        }
         showZenSyncSettings(startSync: false)
     }
 
@@ -11433,14 +11360,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         transfer: ZenBookTransfer = .none,
         completion: ((String, Bool) -> Void)? = nil
     ) {
-        guard ProLicenseManager.shared.isPro else {
-            if !automatic {
-                showProUnlock()
-            }
-            completion?(L("WebDAV 书库需要 EasyRead Pro 授权。",
-                          "The WebDAV library requires an EasyRead Pro license."), false)
-            return
-        }
         guard activeShelf == .webdav else {
             completion?(L("请先切换到 WebDAV 书库。", "Switch to the WebDAV library first."), false)
             return
@@ -11538,13 +11457,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     /// Upload action for the Jianguoyun library: adds the local books that the
     /// cloud does not have and pushes this Mac's real reading positions.
     private func performZenUpload(completion: ((String, Bool) -> Void)? = nil) {
-        guard ProLicenseManager.shared.isPro else {
-            let message = L("WebDAV 书库需要 EasyRead Pro 授权。",
-                            "The WebDAV library requires an EasyRead Pro license.")
-            sidebar.setZenStatus(.notice(message))
-            completion?(message, false)
-            return
-        }
         guard activeShelf == .webdav else {
             let message = L("请先切换到 WebDAV 书库。", "Switch to the WebDAV library first.")
             sidebar.setZenStatus(.notice(message))
@@ -11614,13 +11526,6 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
     /// Download action: pulls cloud books missing on this Mac and applies newer
     /// cloud reading positions. It never uploads or modifies cloud data.
     private func performZenDownload(completion: ((String, Bool) -> Void)? = nil) {
-        guard ProLicenseManager.shared.isPro else {
-            let message = L("WebDAV 书库需要 EasyRead Pro 授权。",
-                            "The WebDAV library requires an EasyRead Pro license.")
-            sidebar.setZenStatus(.notice(message))
-            completion?(message, false)
-            return
-        }
         guard activeShelf == .webdav else {
             let message = L("请先切换到 WebDAV 书库。", "Switch to the WebDAV library first.")
             sidebar.setZenStatus(.notice(message))
@@ -11920,42 +11825,7 @@ final class MainViewController: NSViewController, NSMenuItemValidation {
         refreshSidebar(scrollToTop: false)
     }
 
-    private func showProUnlock() {
-        let appearance = NSAppearance(named: reader.isDarkMode ? .darkAqua : .aqua)
-        if let existing = proUnlockController {
-            existing.applyAppearance(appearance)
-            existing.window?.makeKeyAndOrderFront(nil)
-            return
-        }
-        let controller = ProUnlockWindowController(appearance: appearance)
-        controller.onUnlocked = { [weak self] in
-            self?.proLicenseDidUnlock()
-        }
-        proUnlockController = controller
-        guard let parent = view.window, let proWindow = controller.window else {
-            controller.showWindow(nil)
-            return
-        }
-        parent.beginSheet(proWindow) { [weak self] _ in
-            if self?.proUnlockController === controller {
-                self?.proUnlockController = nil
-            }
-        }
-    }
-
-    private func proLicenseDidUnlock() {
-        sidebar.setProUnlocked(true)
-        NSApp.mainMenu?.update()
-        if activeShelf == .webdav {
-            refreshZenStatusForCurrentConfiguration()
-        }
-    }
-
     private func showZenSyncSettings(startSync: Bool) {
-        guard ProLicenseManager.shared.isPro else {
-            showProUnlock()
-            return
-        }
         let appearance = NSAppearance(named: reader.isDarkMode ? .darkAqua : .aqua)
         if let existing = zenSettingsController {
             existing.applyAppearance(appearance)
@@ -12810,13 +12680,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         aboutItem.target = NSApp
         appMenu.addItem(aboutItem)
-        let proItem = NSMenuItem(
-            title: L("解锁 EasyRead Pro（¥8）…", "Unlock EasyRead Pro (¥8)…"),
-            action: #selector(MainViewController.showProUnlockFromMenu(_:)),
-            keyEquivalent: ""
-        )
-        proItem.target = mainViewController
-        appMenu.addItem(proItem)
         appMenu.addItem(.separator())
 
         let languageMenuItem = NSMenuItem(title: L("语言 / Language", "Language / 语言"), action: nil, keyEquivalent: "")

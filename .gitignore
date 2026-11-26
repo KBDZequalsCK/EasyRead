@@ -2,8 +2,5 @@
 build/
 outputs/EasyRead-Intel.dmg
 outputs/EasyRead-Intel-*.dmg
-
-# Never commit license signing keys or generated license batches.
-.easyread-license/
-license-keys/
-*.key
+outputs/EasyRead-ARM64*.dmg
+outputs/EasyRead-Universal*.dmg
